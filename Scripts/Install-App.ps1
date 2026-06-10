@@ -352,7 +352,7 @@ if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
 }
 
 Write-Host "Installing $($App.Name)..."
-Invoke-Checked -FilePath "git" -Arguments @("submodule", "update", "--init", "--recursive", "--", $App.Path) -WorkingDirectory $Root
+Invoke-Checked -FilePath "git" -Arguments @("-c", "core.longpaths=true", "submodule", "update", "--init", "--recursive", "--", $App.Path) -WorkingDirectory $Root
 
 Require-File $RequirementsPath
 Require-File $MainPath
