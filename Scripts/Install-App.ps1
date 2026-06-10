@@ -39,6 +39,41 @@ function Require-File {
     }
 }
 
+function Add-PathEntry {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return
+    }
+
+    $entries = @($env:PATH -split [IO.Path]::PathSeparator)
+    if ($entries -notcontains $Path) {
+        $env:PATH = $Path + [IO.Path]::PathSeparator + $env:PATH
+    }
+}
+
+function Use-GitRuntimePath {
+    $gitCommand = Get-Command "git.exe" -ErrorAction SilentlyContinue
+    if (-not $gitCommand) {
+        return
+    }
+
+    $gitCmdDir = Split-Path -Parent $gitCommand.Source
+    $gitRoot = Split-Path -Parent $gitCmdDir
+    Add-PathEntry (Join-Path $gitRoot "usr\bin")
+    Add-PathEntry (Join-Path $gitRoot "mingw64\bin")
+
+    try {
+        $execPath = (& $gitCommand.Source --exec-path | Select-Object -First 1)
+        if ($execPath) {
+            Add-PathEntry $execPath
+        }
+    }
+    catch {
+        Write-Warning "Failed to resolve git exec path: $_"
+    }
+}
+
 function Get-GitHubLatestRelease {
     param([string]$Repository)
 
@@ -275,6 +310,7 @@ if (-not $Root) {
     $Root = Join-Path $PSScriptRoot ".."
 }
 $Root = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Root)
+Use-GitRuntimePath
 
 if ($AppId -eq "maa") {
     $maaDir = Join-Path $Root "Apps\MAA"
