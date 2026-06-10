@@ -1,0 +1,12 @@
+[submodule "src/ok-end-field"]
+	path = src/ok-end-field
+	url = https://github.com/AliceJump/ok-end-field.git
+	branch = master
+[submodule "src/ok-nte"]
+	path = src/ok-nte
+	url = https://github.com/BnanZ0/ok-nte.git
+	branch = main
+[submodule "src/ok-wuthering-waves"]
+	path = src/ok-wuthering-waves
+	url = https://github.com/ok-oldking/ok-wuthering-waves.git
+	branch = master
