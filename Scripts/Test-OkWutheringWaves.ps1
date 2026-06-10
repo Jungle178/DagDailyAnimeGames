@@ -1,6 +1,6 @@
 param(
     [string]$Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path,
-    [string]$GameExe = "F:\Wuthering Waves\Wuthering Waves Game\Client\Binaries\Win64\Client-Win64-Shipping.exe",
+    [string]$GameExe = "",
     [int]$TaskIndex = 1,
     [switch]$RunTask,
     [switch]$Gui,
@@ -44,6 +44,73 @@ function Require-Directory {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
         throw "Required directory not found: $Path"
     }
+}
+
+function Get-FirstProcessPathByName {
+    param([string]$Name)
+
+    $processInfo = Get-CimInstance Win32_Process -Filter "Name = '$Name'" -ErrorAction SilentlyContinue |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) } |
+        Sort-Object ProcessId |
+        Select-Object -First 1
+
+    if ($processInfo) {
+        return $processInfo.ExecutablePath
+    }
+
+    return ""
+}
+
+function Get-CachedWutheringGamePath {
+    param([string]$ProjectDir)
+
+    $devicesConfig = Join-Path $ProjectDir "configs\devices.json"
+    if (-not (Test-Path -LiteralPath $devicesConfig -PathType Leaf)) {
+        return ""
+    }
+
+    try {
+        $config = Get-Content -LiteralPath $devicesConfig -Raw -Encoding UTF8 | ConvertFrom-Json
+        $path = [string]$config.pc_full_path
+        if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
+            return $path
+        }
+    }
+    catch {
+        Write-Warning "Failed to read cached Wuthering Waves path: $devicesConfig"
+    }
+
+    return ""
+}
+
+function Resolve-WutheringGamePath {
+    param(
+        [string]$ProjectDir,
+        [string]$ConfiguredGameExe,
+        [bool]$NeedPath
+    )
+
+    if ($ConfiguredGameExe) {
+        return Resolve-FullPath $ConfiguredGameExe
+    }
+
+    if (-not $NeedPath) {
+        return ""
+    }
+
+    $runningPath = Get-FirstProcessPathByName "Client-Win64-Shipping.exe"
+    if ($runningPath) {
+        Write-Host "Using running Wuthering Waves process path: $runningPath"
+        return Resolve-FullPath $runningPath
+    }
+
+    $cachedPath = Get-CachedWutheringGamePath $ProjectDir
+    if ($cachedPath) {
+        Write-Host "Using cached Wuthering Waves process path: $cachedPath"
+        return Resolve-FullPath $cachedPath
+    }
+
+    throw "Wuthering Waves game path is not known. Open the game once and click Confirm Game in the parent GUI, or pass -GameExe <path>."
 }
 
 function Invoke-Checked {
@@ -394,15 +461,16 @@ function Stop-Game {
 }
 
 $Root = Resolve-FullPath $Root
-$GameExe = Resolve-FullPath $GameExe
 $ProjectDir = Join-Path $Root "src\ok-wuthering-waves"
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $SetupScript = Join-Path $Root "Scripts\Setup-OkSharedVenv.ps1"
+$needGamePath = -not $ValidateOnly -and -not $SkipStartGame
+$GameExe = Resolve-WutheringGamePath -ProjectDir $ProjectDir -ConfiguredGameExe $GameExe -NeedPath $needGamePath
 
 Require-Directory $Root
 Require-Directory $ProjectDir
 Require-File (Join-Path $ProjectDir "main.py")
-if (-not $ValidateOnly -and -not $SkipStartGame) {
+if ($GameExe -and -not $ValidateOnly -and -not $SkipStartGame) {
     Require-File $GameExe
 }
 
@@ -448,7 +516,7 @@ if ($elevate) {
     Write-Host "Starting with UAC elevation because current PowerShell is not Administrator."
 }
 
-$shouldCloseGame = -not $KeepGameOpen
+$shouldCloseGame = (-not $KeepGameOpen) -and -not [string]::IsNullOrWhiteSpace($GameExe)
 $shouldWaitForTask = $Wait -or $shouldCloseGame
 $allowNameFallback = -not $StrictGamePath
 

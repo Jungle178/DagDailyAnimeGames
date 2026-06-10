@@ -46,8 +46,10 @@ LOG_ARCHIVE_DIR = ROOT / "Logs"
 SETTINGS_PATH = SCRIPTS / "LocalDailyGui.settings.json"
 POWERSHELL = "powershell.exe"
 CATCH_UP_MINUTES = 30
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 5
 LEGACY_DEFAULT_TIMES = {
+    "maa": ["00:00", "19:00"],
+    "bettergi": ["04:30"],
     "wuthering": ["00:00"],
     "endfield": ["07:00"],
     "nte": ["07:00"],
@@ -67,10 +69,50 @@ class AppConfig:
     workdir: Path
     icon: Path | None
     default_times: tuple[str, ...]
+    installed_files: tuple[Path, ...] = ()
+    requires_game_verification: bool = True
     cleanup_commands: tuple[tuple[str, ...], ...] = ()
 
 
 APPS: tuple[AppConfig, ...] = (
+    AppConfig(
+        app_id="maa",
+        name="MAA-明日方舟",
+        project_dir=ROOT / "Apps" / "MAA",
+        script=SCRIPTS / "Run-MAA-Daily.ps1",
+        workdir=ROOT,
+        icon=None,
+        default_times=("00:00", "19:00"),
+        installed_files=(
+            ROOT / "Apps" / "MAA" / "MAA.exe",
+            ROOT / "Apps" / "MAA" / "maa-cli.exe",
+        ),
+        requires_game_verification=False,
+        cleanup_commands=(
+            (
+                POWERSHELL,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(SCRIPTS / "Stop-MAA-Daily.ps1"),
+            ),
+        ),
+    ),
+    AppConfig(
+        app_id="bettergi",
+        name="BetterGI-原神",
+        project_dir=ROOT / "Apps" / "BetterGI",
+        script=SCRIPTS / "Start-BetterGI-OneDragon.ps1",
+        workdir=ROOT,
+        icon=None,
+        default_times=("04:30",),
+        installed_files=(
+            ROOT / "Apps" / "BetterGI" / "BetterGI.exe",
+        ),
+        requires_game_verification=False,
+        cleanup_commands=(("taskkill", "/IM", "BetterGI.exe", "/T", "/F"),),
+    ),
     AppConfig(
         app_id="wuthering",
         name="ok-鸣潮",
@@ -128,6 +170,8 @@ def validate_times(raw: str) -> list[str]:
 
 
 def app_installed(app: AppConfig) -> bool:
+    if app.installed_files:
+        return all(path.is_file() for path in app.installed_files)
     return (app.project_dir / "requirements.txt").is_file() and (
         app.project_dir / "main.py"
     ).is_file()
@@ -142,7 +186,11 @@ class Settings:
         defaults = {
             "settings_version": SETTINGS_VERSION,
             "apps": {
-                app.app_id: {"enabled": False, "times": list(app.default_times)}
+                app.app_id: {
+                    "enabled": False,
+                    "times": list(app.default_times),
+                    "game_verified": not app.requires_game_verification,
+                }
                 for app in APPS
             },
             "last_runs": {},
@@ -160,7 +208,15 @@ class Settings:
             loaded.setdefault("apps", {})
             loaded["apps"].setdefault(
                 app.app_id,
-                {"enabled": False, "times": list(app.default_times)},
+                {
+                    "enabled": False,
+                    "times": list(app.default_times),
+                    "game_verified": not app.requires_game_verification,
+                },
+            )
+            loaded["apps"][app.app_id].setdefault(
+                "game_verified",
+                not app.requires_game_verification,
             )
             if loaded.get("settings_version") != SETTINGS_VERSION:
                 app_settings = loaded["apps"][app.app_id]
@@ -191,7 +247,23 @@ class Settings:
         return list(times)
 
     def update_app(self, app: AppConfig, enabled: bool, times: list[str]) -> None:
-        self.data["apps"][app.app_id] = {"enabled": enabled, "times": times}
+        current = self.data["apps"].setdefault(app.app_id, {})
+        current.update({"enabled": enabled, "times": times})
+        self.save()
+
+    def game_verified(self, app: AppConfig) -> bool:
+        return bool(self.data["apps"][app.app_id].get("game_verified", False))
+
+    def mark_game_verified(self, app: AppConfig) -> None:
+        app_settings = self.data["apps"].setdefault(app.app_id, {})
+        app_settings["game_verified"] = True
+        app_settings["game_verified_at"] = datetime.now().isoformat(timespec="seconds")
+        self.save()
+
+    def clear_game_verified(self, app: AppConfig) -> None:
+        app_settings = self.data["apps"].setdefault(app.app_id, {})
+        app_settings["game_verified"] = False
+        app_settings.pop("game_verified_at", None)
         self.save()
 
     def was_run(self, app: AppConfig, date: str, time_value: str) -> bool:
@@ -299,7 +371,7 @@ class AppInstaller:
         with self.lock:
             if self.process is process:
                 self.process = None
-        self.log_queue.put((self.app.app_id, "__STATUS__"))
+        self.log_queue.put((self.app.app_id, f"__INSTALL_EXIT__:{exit_code}"))
 
 
 class AppRunner:
@@ -481,10 +553,12 @@ class TaskRow:
         self.stop_button = ttk.Button(actions, text="强制退出", command=self.stop)
         self.schedule_button = ttk.Button(actions, text="定时", command=self.configure_schedule)
         self.install_button = ttk.Button(actions, text="安装", command=self.install)
+        self.verify_button = ttk.Button(actions, text="确认游戏", command=self.verify_game)
         self.start_button.grid(row=0, column=0, padx=6, ipadx=18, ipady=10)
         self.stop_button.grid(row=0, column=1, padx=6, ipadx=12, ipady=10)
         self.schedule_button.grid(row=0, column=2, padx=6, ipadx=18, ipady=10)
         self.install_button.grid(row=0, column=0, columnspan=3, padx=6, ipadx=86, ipady=10)
+        self.verify_button.grid(row=0, column=0, columnspan=3, padx=6, ipadx=76, ipady=10)
 
         Canvas(parent, height=1, bg="#222222", highlightthickness=0).pack(
             fill=X, padx=18, pady=4
@@ -495,6 +569,13 @@ class TaskRow:
         if not app_installed(self.app):
             self.install()
             return
+        if (
+            self.app.requires_game_verification
+            and not self.settings.game_verified(self.app)
+        ):
+            if not self.scheduler.ensure_game_verified(self.app):
+                self.refresh()
+                return
         if reason == "manual" and self.scheduler.any_running(except_app_id=self.app.app_id):
             if not messagebox.askyesno(
                 "已有任务运行",
@@ -513,20 +594,47 @@ class TaskRow:
         if self.installer.start():
             self.refresh()
 
+    def verify_game(self) -> None:
+        self.scheduler.ensure_game_verified(self.app, force_prompt=True)
+        self.refresh()
+
     def refresh(self) -> None:
+        if self.installer.running:
+            self.status_var.set("安装中 | 正在下载并准备运行环境")
+            self.start_button.grid_remove()
+            self.stop_button.grid_remove()
+            self.schedule_button.grid_remove()
+            self.verify_button.grid_remove()
+            self.install_button.grid()
+            self.install_button.configure(state="disabled")
+            return
+
         if not app_installed(self.app):
-            state = "安装中" if self.installer.running else "未安装"
-            self.status_var.set(f"{state} | 点击安装下载项目并安装依赖")
+            self.status_var.set("未安装 | 点击安装下载并准备运行环境")
             self.start_button.grid_remove()
             self.stop_button.grid_remove()
             self.schedule_button.grid_remove()
             self.install_button.grid()
+            self.verify_button.grid_remove()
             self.install_button.configure(
                 state="disabled" if self.installer.running else "normal"
             )
             return
 
         self.install_button.grid_remove()
+        if (
+            self.app.requires_game_verification
+            and not self.settings.game_verified(self.app)
+        ):
+            self.status_var.set("已安装 | 未确认游戏位置 | 打开游戏后点击确认")
+            self.start_button.grid_remove()
+            self.stop_button.grid_remove()
+            self.schedule_button.grid_remove()
+            self.verify_button.grid()
+            self.verify_button.configure(state="normal")
+            return
+
+        self.verify_button.grid_remove()
         self.start_button.grid()
         self.stop_button.grid()
         self.schedule_button.grid()
@@ -709,6 +817,86 @@ class DailyGui:
     def log(self, app_id: str, message: str) -> None:
         self.log_queue.put((app_id, message))
 
+    def app_by_id(self, app_id: str) -> AppConfig | None:
+        return next((app for app in APPS if app.app_id == app_id), None)
+
+    def ensure_game_verified(self, app: AppConfig, force_prompt: bool = False) -> bool:
+        if not app.requires_game_verification:
+            return True
+        if self.settings.game_verified(app) and not force_prompt:
+            return True
+        if not app_installed(app):
+            return False
+
+        if not messagebox.askokcancel(
+            "确认游戏位置",
+            f"请先打开 {app.name} 的 PC 游戏窗口。\n\n"
+            "打开并等待游戏窗口出现后，点击“确定”开始检测。\n"
+            "如果还没准备好，可以取消，之后再点“确认游戏”。",
+            parent=self.root,
+        ):
+            self.log(app.app_id, "已取消游戏位置确认")
+            return False
+
+        command = [
+            POWERSHELL,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(SCRIPTS / "Verify-AppGame.ps1"),
+            "-AppId",
+            app.app_id,
+        ]
+        self.log(app.app_id, f"确认游戏位置: {' '.join(command)}")
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+                check=False,
+                creationflags=HIDDEN_PROCESS_FLAGS,
+            )
+        except subprocess.TimeoutExpired:
+            self.log(app.app_id, "确认游戏位置超时")
+            messagebox.showerror(
+                "确认失败",
+                f"没有在限定时间内确认 {app.name} 的游戏位置。",
+                parent=self.root,
+            )
+            return False
+
+        output = result.stdout.strip()
+        if output:
+            for line in output.splitlines():
+                self.log(app.app_id, line)
+
+        if result.returncode == 0:
+            self.settings.mark_game_verified(app)
+            self.refresh_rows()
+            messagebox.showinfo(
+                "确认完成",
+                f"{app.name} 的游戏位置已确认，可以正式运行。",
+                parent=self.root,
+            )
+            return True
+
+        self.settings.clear_game_verified(app)
+        self.refresh_rows()
+        messagebox.showerror(
+            "确认失败",
+            f"没有找到 {app.name} 的游戏进程。\n\n"
+            "请确认已经打开 PC 游戏窗口，然后再试一次。",
+            parent=self.root,
+        )
+        return False
+
     def process_logs(self) -> None:
         while True:
             try:
@@ -718,6 +906,31 @@ class DailyGui:
 
             if message == "__STATUS__":
                 self.refresh_rows()
+                self.start_next_scheduled()
+                continue
+
+            if message.startswith("__INSTALL_EXIT__:"):
+                self.refresh_rows()
+                exit_code_text = message.split(":", 1)[1]
+                try:
+                    exit_code = int(exit_code_text)
+                except ValueError:
+                    exit_code = -1
+                app = self.app_by_id(app_id)
+                if (
+                    exit_code == 0
+                    and app is not None
+                    and app_installed(app)
+                    and app.requires_game_verification
+                    and not self.settings.game_verified(app)
+                ):
+                    self.root.after(
+                        100,
+                        lambda current_app=app: self.ensure_game_verified(
+                            current_app,
+                            force_prompt=True,
+                        ),
+                    )
                 self.start_next_scheduled()
                 continue
 
@@ -735,6 +948,8 @@ class DailyGui:
         self.check_log_archive(now)
         for app in APPS:
             if not app_installed(app):
+                continue
+            if app.requires_game_verification and not self.settings.game_verified(app):
                 continue
             if not self.settings.app_enabled(app):
                 continue
@@ -905,10 +1120,16 @@ def check_config() -> int:
     print(f"Log directory: {LOG_DIR}")
     print(f"Log archive directory: {LOG_ARCHIVE_DIR}")
     for app in APPS:
+        markers = (
+            ",".join(str(path.exists()).lower() for path in app.installed_files)
+            if app.installed_files
+            else "default"
+        )
         print(
             f"{app.app_id}: script={app.script.exists()} "
             f"project={app_installed(app)} "
-            f"workdir={app.workdir.exists()} icon={app.icon and app.icon.exists()}"
+            f"workdir={app.workdir.exists()} icon={app.icon and app.icon.exists()} "
+            f"verify={app.requires_game_verification} markers={markers}"
         )
     return 0
 
