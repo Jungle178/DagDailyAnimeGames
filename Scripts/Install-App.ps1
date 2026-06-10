@@ -101,10 +101,40 @@ function Expand-ZipAsset {
     Expand-Archive -LiteralPath $ZipPath -DestinationPath $Destination -Force
 }
 
-function Expand-TarReadableAsset {
+function Get-SevenZipExtractor {
+    param([string]$Root)
+
+    $sevenZip = Get-Command "7z.exe" -ErrorAction SilentlyContinue
+    if ($sevenZip) {
+        return $sevenZip.Source
+    }
+
+    $toolDir = Join-Path $Root "Apps\_tools"
+    $sevenZipReduced = Join-Path $toolDir "7zr.exe"
+    if (Test-Path -LiteralPath $sevenZipReduced -PathType Leaf) {
+        return $sevenZipReduced
+    }
+
+    if (-not (Test-Path -LiteralPath $toolDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $toolDir | Out-Null
+    }
+
+    $uri = "https://www.7-zip.org/a/7zr.exe"
+    Write-Host "Downloading local 7-Zip extractor: $uri"
+    Invoke-WebRequest `
+        -Uri $uri `
+        -OutFile $sevenZipReduced `
+        -Headers @{ "User-Agent" = "DagDailyAnimeGames-Installer" }
+
+    Require-File $sevenZipReduced
+    return $sevenZipReduced
+}
+
+function Expand-SevenZipAsset {
     param(
         [string]$ArchivePath,
-        [string]$Destination
+        [string]$Destination,
+        [string]$Root
     )
 
     if (Test-Path -LiteralPath $Destination) {
@@ -112,23 +142,10 @@ function Expand-TarReadableAsset {
     }
     New-Item -ItemType Directory -Path $Destination | Out-Null
 
-    $sevenZip = Get-Command "7z.exe" -ErrorAction SilentlyContinue
-    if ($sevenZip) {
-        & $sevenZip.Source x "-o$Destination" -y $ArchivePath
-        if ($LASTEXITCODE -ne 0) {
-            throw "7z.exe failed to extract $ArchivePath with code $LASTEXITCODE"
-        }
-        return
-    }
-
-    $tar = Get-Command "tar.exe" -ErrorAction SilentlyContinue
-    if (-not $tar) {
-        throw "Neither 7z.exe nor tar.exe was found. Cannot extract archive: $ArchivePath"
-    }
-
-    & $tar.Source -xf $ArchivePath -C $Destination
+    $extractor = Get-SevenZipExtractor -Root $Root
+    & $extractor x "-o$Destination" -y $ArchivePath
     if ($LASTEXITCODE -ne 0) {
-        throw "tar.exe failed to extract $ArchivePath with code $LASTEXITCODE"
+        throw "$extractor failed to extract $ArchivePath with code $LASTEXITCODE"
     }
 }
 
@@ -232,7 +249,7 @@ function Install-BetterGiRelease {
         -Patterns @("^BetterGI_v.*\.7z$", "^BetterGI.*\.7z$")
     $archivePath = Join-Path $downloadDir $asset.name
     Save-ReleaseAsset -Asset $asset -Destination $archivePath
-    Expand-TarReadableAsset -ArchivePath $archivePath -Destination $extractDir
+    Expand-SevenZipAsset -ArchivePath $archivePath -Destination $extractDir -Root $Root
 
     $betterGiExe = Get-ChildItem -LiteralPath $extractDir -Recurse -File -Filter "BetterGI.exe" |
         Select-Object -First 1
