@@ -46,6 +46,12 @@ LOG_ARCHIVE_DIR = ROOT / "Logs"
 SETTINGS_PATH = SCRIPTS / "LocalDailyGui.settings.json"
 POWERSHELL = "powershell.exe"
 CATCH_UP_MINUTES = 30
+SETTINGS_VERSION = 2
+LEGACY_DEFAULT_TIMES = {
+    "wuthering": ["00:00"],
+    "endfield": ["07:00"],
+    "nte": ["07:00"],
+}
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 TASK_PROCESS_FLAGS = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -56,6 +62,7 @@ HIDDEN_PROCESS_FLAGS = CREATE_NO_WINDOW if os.name == "nt" else 0
 class AppConfig:
     app_id: str
     name: str
+    project_dir: Path
     script: Path
     workdir: Path
     icon: Path | None
@@ -67,26 +74,29 @@ APPS: tuple[AppConfig, ...] = (
     AppConfig(
         app_id="wuthering",
         name="ok-鸣潮",
+        project_dir=SRC_DIR / "ok-wuthering-waves",
         script=SCRIPTS / "Run-OkWutheringWavesDaily.ps1",
         workdir=ROOT,
         icon=SRC_DIR / "ok-wuthering-waves" / "icons" / "icon.png",
-        default_times=("00:00",),
+        default_times=(),
     ),
     AppConfig(
         app_id="endfield",
         name="ok-终末地",
+        project_dir=SRC_DIR / "ok-end-field",
         script=SCRIPTS / "Run-OkEndFieldDaily.ps1",
         workdir=ROOT,
         icon=SRC_DIR / "ok-end-field" / "icons" / "icon.png",
-        default_times=("07:00",),
+        default_times=(),
     ),
     AppConfig(
         app_id="nte",
         name="ok-异环",
+        project_dir=SRC_DIR / "ok-nte",
         script=SCRIPTS / "Run-OkNteDaily.ps1",
         workdir=ROOT,
         icon=SRC_DIR / "ok-nte" / "icons" / "icon.png",
-        default_times=("07:00",),
+        default_times=(),
     ),
 )
 
@@ -117,6 +127,12 @@ def validate_times(raw: str) -> list[str]:
     return sorted(set(result))
 
 
+def app_installed(app: AppConfig) -> bool:
+    return (app.project_dir / "requirements.txt").is_file() and (
+        app.project_dir / "main.py"
+    ).is_file()
+
+
 class Settings:
     def __init__(self, path: Path):
         self.path = path
@@ -124,8 +140,9 @@ class Settings:
 
     def _load(self) -> dict:
         defaults = {
+            "settings_version": SETTINGS_VERSION,
             "apps": {
-                app.app_id: {"enabled": True, "times": list(app.default_times)}
+                app.app_id: {"enabled": False, "times": list(app.default_times)}
                 for app in APPS
             },
             "last_runs": {},
@@ -143,8 +160,17 @@ class Settings:
             loaded.setdefault("apps", {})
             loaded["apps"].setdefault(
                 app.app_id,
-                {"enabled": True, "times": list(app.default_times)},
+                {"enabled": False, "times": list(app.default_times)},
             )
+            if loaded.get("settings_version") != SETTINGS_VERSION:
+                app_settings = loaded["apps"][app.app_id]
+                if (
+                    app_settings.get("enabled") is True
+                    and app_settings.get("times") == LEGACY_DEFAULT_TIMES.get(app.app_id)
+                ):
+                    app_settings["enabled"] = False
+                    app_settings["times"] = []
+        loaded["settings_version"] = SETTINGS_VERSION
         loaded.setdefault("last_runs", {})
         loaded.setdefault("log_archives", {})
         return loaded
@@ -156,10 +182,13 @@ class Settings:
         )
 
     def app_enabled(self, app: AppConfig) -> bool:
-        return bool(self.data["apps"][app.app_id].get("enabled", True))
+        return bool(self.data["apps"][app.app_id].get("enabled", False))
 
     def app_times(self, app: AppConfig) -> list[str]:
-        return list(self.data["apps"][app.app_id].get("times") or app.default_times)
+        times = self.data["apps"][app.app_id].get("times")
+        if times is None:
+            times = app.default_times
+        return list(times)
 
     def update_app(self, app: AppConfig, enabled: bool, times: list[str]) -> None:
         self.data["apps"][app.app_id] = {"enabled": enabled, "times": times}
@@ -206,6 +235,71 @@ class Settings:
             for key, value in self.data["log_archives"].items()
             if key >= keep_after
         }
+
+
+class AppInstaller:
+    def __init__(self, app: AppConfig, log_queue: queue.Queue[tuple[str, str]]):
+        self.app = app
+        self.log_queue = log_queue
+        self.process: subprocess.Popen[str] | None = None
+        self.lock = threading.Lock()
+
+    @property
+    def running(self) -> bool:
+        with self.lock:
+            return self.process is not None and self.process.poll() is None
+
+    def start(self) -> bool:
+        with self.lock:
+            if self.process is not None and self.process.poll() is None:
+                self.log("安装正在运行，忽略新的安装请求")
+                return False
+
+            command = [
+                POWERSHELL,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(SCRIPTS / "Install-App.ps1"),
+                "-AppId",
+                self.app.app_id,
+            ]
+            self.log(f"安装: {' '.join(command)}")
+            self.process = subprocess.Popen(
+                command,
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=TASK_PROCESS_FLAGS,
+            )
+
+        threading.Thread(target=self._read_output, daemon=True).start()
+        return True
+
+    def log(self, message: str) -> None:
+        self.log_queue.put((self.app.app_id, message))
+
+    def _read_output(self) -> None:
+        process = self.process
+        if process is None:
+            return
+
+        assert process.stdout is not None
+        for line in process.stdout:
+            self.log(line.rstrip())
+
+        exit_code = process.wait()
+        self.log(f"安装结束，退出码: {exit_code}")
+        with self.lock:
+            if self.process is process:
+                self.process = None
+        self.log_queue.put((self.app.app_id, "__STATUS__"))
 
 
 class AppRunner:
@@ -343,11 +437,13 @@ class TaskRow:
         parent: Frame,
         app: AppConfig,
         runner: AppRunner,
+        installer: AppInstaller,
         settings: Settings,
         scheduler: "DailyGui",
     ):
         self.app = app
         self.runner = runner
+        self.installer = installer
         self.settings = settings
         self.scheduler = scheduler
 
@@ -384,9 +480,11 @@ class TaskRow:
         self.start_button = ttk.Button(actions, text="启动", command=self.start)
         self.stop_button = ttk.Button(actions, text="强制退出", command=self.stop)
         self.schedule_button = ttk.Button(actions, text="定时", command=self.configure_schedule)
+        self.install_button = ttk.Button(actions, text="安装", command=self.install)
         self.start_button.grid(row=0, column=0, padx=6, ipadx=18, ipady=10)
         self.stop_button.grid(row=0, column=1, padx=6, ipadx=12, ipady=10)
         self.schedule_button.grid(row=0, column=2, padx=6, ipadx=18, ipady=10)
+        self.install_button.grid(row=0, column=0, columnspan=3, padx=6, ipadx=86, ipady=10)
 
         Canvas(parent, height=1, bg="#222222", highlightthickness=0).pack(
             fill=X, padx=18, pady=4
@@ -394,6 +492,9 @@ class TaskRow:
         self.refresh()
 
     def start(self, reason: str = "manual") -> None:
+        if not app_installed(self.app):
+            self.install()
+            return
         if reason == "manual" and self.scheduler.any_running(except_app_id=self.app.app_id):
             if not messagebox.askyesno(
                 "已有任务运行",
@@ -408,11 +509,32 @@ class TaskRow:
         self.runner.stop()
         self.refresh()
 
+    def install(self) -> None:
+        if self.installer.start():
+            self.refresh()
+
     def refresh(self) -> None:
+        if not app_installed(self.app):
+            state = "安装中" if self.installer.running else "未安装"
+            self.status_var.set(f"{state} | 点击安装下载项目并安装依赖")
+            self.start_button.grid_remove()
+            self.stop_button.grid_remove()
+            self.schedule_button.grid_remove()
+            self.install_button.grid()
+            self.install_button.configure(
+                state="disabled" if self.installer.running else "normal"
+            )
+            return
+
+        self.install_button.grid_remove()
+        self.start_button.grid()
+        self.stop_button.grid()
+        self.schedule_button.grid()
         enabled = self.settings.app_enabled(self.app)
-        times = ", ".join(self.settings.app_times(self.app))
+        times_list = self.settings.app_times(self.app)
+        times = ", ".join(times_list) if times_list else "未设置"
         state = "运行中" if self.runner.running else "空闲"
-        schedule = "定时开" if enabled else "定时关"
+        schedule = "定时开" if enabled and times_list else "定时关"
         self.status_var.set(f"{state} | {schedule} | {times}")
         self.start_button.configure(state="disabled" if self.runner.running else "normal")
         self.stop_button.configure(state="normal" if self.runner.running else "disabled")
@@ -461,11 +583,15 @@ class ScheduleDialog:
         ttk.Button(buttons, text="保存", command=self.save).pack(side=LEFT)
 
     def save(self) -> None:
-        try:
-            times = validate_times(self.times.get())
-        except ValueError as exc:
-            messagebox.showerror("定时设置错误", str(exc), parent=self.window)
-            return
+        raw_times = self.times.get()
+        if self.enabled.get() or raw_times.strip():
+            try:
+                times = validate_times(raw_times)
+            except ValueError as exc:
+                messagebox.showerror("定时设置错误", str(exc), parent=self.window)
+                return
+        else:
+            times = []
 
         self.settings.update_app(self.app, self.enabled.get(), times)
         self.on_save()
@@ -478,6 +604,7 @@ class DailyGui:
         self.settings = Settings(SETTINGS_PATH)
         self.settings.save()
         self.log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self.installers = {app.app_id: AppInstaller(app, self.log_queue) for app in APPS}
         self.runners = {app.app_id: AppRunner(app, self.log_queue) for app in APPS}
         self.rows: dict[str, TaskRow] = {}
         self.images: list[ImageTk.PhotoImage] = []
@@ -515,7 +642,14 @@ class DailyGui:
         right.pack(side=RIGHT, fill=Y)
 
         for app in APPS:
-            row = TaskRow(left, app, self.runners[app.app_id], self.settings, self)
+            row = TaskRow(
+                left,
+                app,
+                self.runners[app.app_id],
+                self.installers[app.app_id],
+                self.settings,
+                self,
+            )
             self.rows[app.app_id] = row
             self.images.append(row.icon_image)
 
@@ -600,6 +734,8 @@ class DailyGui:
         today = now.strftime("%Y-%m-%d")
         self.check_log_archive(now)
         for app in APPS:
+            if not app_installed(app):
+                continue
             if not self.settings.app_enabled(app):
                 continue
 
@@ -771,6 +907,7 @@ def check_config() -> int:
     for app in APPS:
         print(
             f"{app.app_id}: script={app.script.exists()} "
+            f"project={app_installed(app)} "
             f"workdir={app.workdir.exists()} icon={app.icon and app.icon.exists()}"
         )
     return 0

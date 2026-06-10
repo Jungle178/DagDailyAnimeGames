@@ -1,10 +1,14 @@
 param(
     [switch]$Check,
     [switch]$NoElevate,
-    [string]$Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+    [string]$Root = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $Root) {
+    $Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+}
 
 $python = Join-Path $Root ".venv\Scripts\python.exe"
 $pythonw = Join-Path $Root ".venv\Scripts\pythonw.exe"

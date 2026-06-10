@@ -1,5 +1,5 @@
 param(
-    [string]$Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path,
+    [string]$Root = "",
     [string]$VenvName = ".venv",
     [string]$RequirementsPath = "",
     [switch]$Recreate,
@@ -97,41 +97,26 @@ function Remove-VenvSafely {
         throw "Refusing to remove unexpected directory: $resolvedVenv"
     }
 
-    Write-Host "Removing existing shared venv: $resolvedVenv"
+    Write-Host "Removing existing venv: $resolvedVenv"
     Remove-Item -LiteralPath $resolvedVenv -Recurse -Force
 }
 
+if (-not $Root) {
+    $Root = Join-Path $PSScriptRoot ".."
+}
 $Root = Resolve-FullPath $Root
-$VenvPath = Resolve-FullPath (Join-Path $Root $VenvName)
-$VenvPython = Join-Path $VenvPath "Scripts\python.exe"
 if (-not $RequirementsPath) {
     $RequirementsPath = Join-Path $Root "requirements.txt"
 }
 else {
     $RequirementsPath = Resolve-FullPath $RequirementsPath
 }
-$MergeRequirementsScript = Join-Path $Root "Scripts\Merge-Requirements.py"
 
-$Projects = @(
-    "src\ok-end-field",
-    "src\ok-nte",
-    "src\ok-wuthering-waves"
-)
-
-$RequirementFiles = @(
-    (Join-Path $Root "src\ok-end-field\requirements.txt"),
-    (Join-Path $Root "src\ok-nte\requirements.txt"),
-    (Join-Path $Root "src\ok-wuthering-waves\requirements.txt")
-)
+$VenvPath = Resolve-FullPath (Join-Path $Root $VenvName)
+$VenvPython = Join-Path $VenvPath "Scripts\python.exe"
 
 Require-Directory $Root
-foreach ($project in $Projects) {
-    Require-Directory (Join-Path $Root $project)
-}
-Require-File $MergeRequirementsScript
-foreach ($requirementsFile in $RequirementFiles) {
-    Require-File $requirementsFile
-}
+Require-File $RequirementsPath
 
 if ($Recreate) {
     Remove-VenvSafely -RootPath $Root -VenvPath $VenvPath
@@ -139,17 +124,14 @@ if ($Recreate) {
 
 if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
     $python = Get-Python312
-    Write-Host "Creating shared venv: $VenvPath"
+    Write-Host "Creating venv: $VenvPath"
     Invoke-Checked -FilePath $python.FilePath -Arguments (@($python.Arguments) + @("-m", "venv", $VenvPath)) -WorkingDirectory $Root
 }
 else {
-    Write-Host "Using existing shared venv: $VenvPath"
+    Write-Host "Using existing venv: $VenvPath"
 }
 
 Require-File $VenvPython
-
-Invoke-Checked -FilePath $VenvPython -Arguments (@($MergeRequirementsScript, "--output", $RequirementsPath) + $RequirementFiles) -WorkingDirectory $Root
-Require-File $RequirementsPath
 
 if (-not $SkipInstall) {
     Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-U", "pip", "setuptools", "wheel") -WorkingDirectory $Root
@@ -160,15 +142,11 @@ else {
 }
 
 if (-not $SkipValidation) {
-    foreach ($project in $Projects) {
-        $projectPath = Join-Path $Root $project
-        Invoke-Checked -FilePath $VenvPython -Arguments @("-c", "import ok, main; print('$project import ok/main OK', ok.__file__)") -WorkingDirectory $projectPath
-    }
-    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "check") -WorkingDirectory $Root
+    Invoke-Checked -FilePath $VenvPython -Arguments @("-c", "import tkinter; from PIL import Image, ImageTk; print('GUI environment OK')") -WorkingDirectory $Root
 }
 else {
     Write-Host "Skipping validation."
 }
 
-Write-Host "Shared OK venv is ready: $VenvPath"
+Write-Host "GUI venv is ready: $VenvPath"
 Write-Host "Python: $VenvPython"
