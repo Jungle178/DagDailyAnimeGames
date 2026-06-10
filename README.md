@@ -26,7 +26,13 @@ git submodule update --init --recursive
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Scripts\Setup-OkSharedVenv.ps1
 ```
 
-该脚本会在仓库根目录创建 `.venv-ok`，安装 `ok-nte` 的依赖以及几个三项目共用的补充依赖。
+也可以直接运行根目录的批处理：
+
+```powershell
+.\Setup.bat
+```
+
+该脚本会在仓库根目录创建或复用 `.venv`，合并 `src/ok-end-field/requirements.txt`、`src/ok-nte/requirements.txt`、`src/ok-wuthering-waves/requirements.txt`，同名依赖保留较新的版本，并执行依赖更新。
 
 ## 启动 GUI
 
@@ -59,7 +65,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Scripts\Start-LocalDailyGu
 
 以下内容不会提交到 Git：
 
-- `.venv-ok/` 和其他虚拟环境。
+- `.venv/` 和其他虚拟环境。
 - `Logs/` 中的运行日志。
 - `Scripts/LocalDailyGui.settings.json` 中的本地定时配置。
 

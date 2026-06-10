@@ -12,7 +12,7 @@ if (-not $ProjectDir) {
 }
 
 if (-not $Python) {
-    $Python = Join-Path $Root ".venv-ok\Scripts\python.exe"
+    $Python = Join-Path $Root ".venv\Scripts\python.exe"
 }
 
 if (-not (Test-Path -LiteralPath $ProjectDir -PathType Container)) {

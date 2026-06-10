@@ -1,6 +1,7 @@
 param(
     [string]$Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path,
-    [string]$VenvName = ".venv-ok",
+    [string]$VenvName = ".venv",
+    [string]$RequirementsPath = "",
     [switch]$Recreate,
     [switch]$SkipInstall,
     [switch]$SkipValidation
@@ -103,6 +104,13 @@ function Remove-VenvSafely {
 $Root = Resolve-FullPath $Root
 $VenvPath = Resolve-FullPath (Join-Path $Root $VenvName)
 $VenvPython = Join-Path $VenvPath "Scripts\python.exe"
+if (-not $RequirementsPath) {
+    $RequirementsPath = Join-Path $Root "requirements.txt"
+}
+else {
+    $RequirementsPath = Resolve-FullPath $RequirementsPath
+}
+$MergeRequirementsScript = Join-Path $Root "Scripts\Merge-Requirements.py"
 
 $Projects = @(
     "src\ok-end-field",
@@ -110,20 +118,20 @@ $Projects = @(
     "src\ok-wuthering-waves"
 )
 
-$SupplementPackages = @(
-    "imagehash==4.3.2",
-    "pillow>=10.0.0",
-    "playwright==1.57.0",
-    "pyautogui==0.9.54",
-    "websocket-client==1.9.0",
-    "websockets==15.0.1"
+$RequirementFiles = @(
+    (Join-Path $Root "src\ok-end-field\requirements.txt"),
+    (Join-Path $Root "src\ok-nte\requirements.txt"),
+    (Join-Path $Root "src\ok-wuthering-waves\requirements.txt")
 )
 
 Require-Directory $Root
 foreach ($project in $Projects) {
     Require-Directory (Join-Path $Root $project)
 }
-Require-File (Join-Path $Root "src\ok-nte\requirements.txt")
+Require-File $MergeRequirementsScript
+foreach ($requirementsFile in $RequirementFiles) {
+    Require-File $requirementsFile
+}
 
 if ($Recreate) {
     Remove-VenvSafely -RootPath $Root -VenvPath $VenvPath
@@ -140,10 +148,12 @@ else {
 
 Require-File $VenvPython
 
+Invoke-Checked -FilePath $VenvPython -Arguments (@($MergeRequirementsScript, "--output", $RequirementsPath) + $RequirementFiles) -WorkingDirectory $Root
+Require-File $RequirementsPath
+
 if (-not $SkipInstall) {
     Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-U", "pip", "setuptools", "wheel") -WorkingDirectory $Root
-    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-r", (Join-Path $Root "src\ok-nte\requirements.txt")) -WorkingDirectory $Root
-    Invoke-Checked -FilePath $VenvPython -Arguments (@("-m", "pip", "install") + $SupplementPackages) -WorkingDirectory $Root
+    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-U", "-r", $RequirementsPath) -WorkingDirectory $Root
 }
 else {
     Write-Host "Skipping dependency installation."

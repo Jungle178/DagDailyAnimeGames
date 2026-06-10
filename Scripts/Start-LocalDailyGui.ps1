@@ -6,8 +6,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$python = Join-Path $Root ".venv-ok\Scripts\python.exe"
-$pythonw = Join-Path $Root ".venv-ok\Scripts\pythonw.exe"
+$python = Join-Path $Root ".venv\Scripts\python.exe"
+$pythonw = Join-Path $Root ".venv\Scripts\pythonw.exe"
 $gui = Join-Path $PSScriptRoot "LocalDailyGui.py"
 
 function Test-IsAdmin {

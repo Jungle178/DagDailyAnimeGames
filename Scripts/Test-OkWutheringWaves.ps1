@@ -396,7 +396,7 @@ function Stop-Game {
 $Root = Resolve-FullPath $Root
 $GameExe = Resolve-FullPath $GameExe
 $ProjectDir = Join-Path $Root "src\ok-wuthering-waves"
-$VenvPython = Join-Path $Root ".venv-ok\Scripts\python.exe"
+$VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $SetupScript = Join-Path $Root "Scripts\Setup-OkSharedVenv.ps1"
 
 Require-Directory $Root
