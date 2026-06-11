@@ -74,6 +74,21 @@ function Set-JsonProperty {
     }
 }
 
+function Get-JsonPropertyValue {
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object) {
+        return $null
+    }
+    if ($Object.PSObject.Properties.Name -contains $Name) {
+        return $Object.$Name
+    }
+    return $null
+}
+
 function Save-JsonObject {
     param(
         [string]$Path,
@@ -455,27 +470,27 @@ function Convert-MaaGuiToCliConfig {
             'client_type = "Official"',
             "",
             "[[tasks]]",
-            'name = "开始唤醒"',
+            'name = "StartUp"',
             'type = "StartUp"',
             "",
             "[[tasks]]",
-            'name = "理智作战"',
+            'name = "Fight"',
             'type = "Fight"',
             "",
             "[[tasks]]",
-            'name = "基建换班"',
+            'name = "Infrast"',
             'type = "Infrast"',
             "",
             "[[tasks]]",
-            'name = "自动公招"',
+            'name = "Recruit"',
             'type = "Recruit"',
             "",
             "[[tasks]]",
-            'name = "信用收支"',
+            'name = "Mall"',
             'type = "Mall"',
             "",
             "[[tasks]]",
-            'name = "领取奖励"',
+            'name = "Award"',
             'type = "Award"',
             ""
         ) -join [Environment]::NewLine
@@ -538,6 +553,38 @@ function Convert-MaaGuiToCliConfig {
         Award   = "Award"
     }
 
+    function ConvertTo-TomlString {
+        param([AllowNull()][object]$Value)
+
+        $text = [string]$Value
+        $text = $text.Replace('\', '\\')
+        $text = $text.Replace('"', '\"')
+        $text = $text.Replace("`r", '\r')
+        $text = $text.Replace("`n", '\n')
+        $text = $text.Replace("`t", '\t')
+        '"' + $text + '"'
+    }
+
+    function ConvertTo-TomlStringArray {
+        param([object[]]$Values)
+
+        $items = @($Values | Where-Object { $null -ne $_ -and [string]$_ -ne "" } | ForEach-Object { ConvertTo-TomlString $_ })
+        "[$($items -join ", ")]"
+    }
+
+    function ConvertTo-TomlNumberArray {
+        param([object[]]$Values)
+
+        $items = @($Values | Where-Object { $null -ne $_ -and [string]$_ -ne "" } | ForEach-Object { [string]$_ })
+        "[$($items -join ", ")]"
+    }
+
+    function ConvertTo-TomlBool {
+        param([object]$Value)
+
+        ([bool]$Value).ToString().ToLowerInvariant()
+    }
+
     $lines = @(
         '"$schema" = "../schemas/task.schema.json"',
         'client_type = "Official"',
@@ -553,52 +600,121 @@ function Convert-MaaGuiToCliConfig {
             continue
         }
 
-        $name = $task.Name
+        $name = [string]$task.Name
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            $name = $cliType
+        }
         $lines += "[[tasks]]"
-        $lines += "name = `"$name`""
-        $lines += "type = `"$cliType`""
+        $lines += "name = $(ConvertTo-TomlString $name)"
+        $lines += "type = $(ConvertTo-TomlString $cliType)"
+        $paramLines = @()
 
         switch ($task.TaskType) {
             "Fight" {
                 if ($task.StagePlan -and $task.StagePlan.Count -gt 0) {
-                    $lines += "stage = `"$($task.StagePlan[0])`""
+                    $stage = @($task.StagePlan)[0]
+                    $paramLines += "stage = $(ConvertTo-TomlString $stage)"
                 }
-                if ($task.MedicineCount) { $lines += "medicine = $($task.MedicineCount)" }
-                if ($task.StoneCount) { $lines += "stone = $($task.StoneCount)" }
-                if ($task.TimesLimit) { $lines += "times = $($task.TimesLimit)" }
+                if ($task.MedicineCount) { $paramLines += "medicine = $($task.MedicineCount)" }
+                if ($task.StoneCount) { $paramLines += "stone = $($task.StoneCount)" }
+                if ($task.TimesLimit) { $paramLines += "times = $($task.TimesLimit)" }
             }
             "Infrast" {
-                if ($task.Mode) { $lines += "mode = $($task.Mode)" }
+                $modeMap = @{
+                    Default  = 0
+                    Custom   = 10000
+                    Rotation = 20000
+                }
+                $modeValue = 0
+                if ($task.Mode -and $modeMap.ContainsKey([string]$task.Mode)) {
+                    $modeValue = $modeMap[[string]$task.Mode]
+                }
+                $paramLines += "mode = $modeValue"
+
+                $facilities = @($task.RoomList | ForEach-Object { $_.Room } | Where-Object { $_ })
+                if ($facilities.Count -gt 0) {
+                    $paramLines += "facility = $(ConvertTo-TomlStringArray $facilities)"
+                }
+                if ($task.UsesOfDrones) {
+                    $paramLines += "drones = $(ConvertTo-TomlString $task.UsesOfDrones)"
+                }
                 if ($task.DormThreshold) {
                     $threshold = [double]$task.DormThreshold / 100.0
-                    $lines += "threshold = $threshold"
+                    $paramLines += "threshold = $threshold"
+                }
+                if ($null -ne $task.OriginiumShardAutoReplenishment) {
+                    $paramLines += "replenish = $(ConvertTo-TomlBool $task.OriginiumShardAutoReplenishment)"
+                }
+                if ($null -ne $task.DormFilterNotStationed) {
+                    $paramLines += "dorm_notstationed_enabled = $(ConvertTo-TomlBool $task.DormFilterNotStationed)"
+                }
+                if ($null -ne $task.DormTrustEnabled) {
+                    $paramLines += "dorm_trust_enabled = $(ConvertTo-TomlBool $task.DormTrustEnabled)"
+                }
+                if ($null -ne $task.ReceptionMessageBoard) {
+                    $paramLines += "reception_message_board = $(ConvertTo-TomlBool $task.ReceptionMessageBoard)"
+                }
+                if ($null -ne $task.ReceptionClueExchange) {
+                    $paramLines += "reception_clue_exchange = $(ConvertTo-TomlBool $task.ReceptionClueExchange)"
+                }
+                if ($null -ne $task.SendClue) {
+                    $paramLines += "reception_send_clue = $(ConvertTo-TomlBool $task.SendClue)"
+                }
+                if ($modeValue -eq 10000 -and $task.Filename) {
+                    $paramLines += "filename = $(ConvertTo-TomlString $task.Filename)"
+                    if ($task.PlanSelect -ge 0) {
+                        $paramLines += "plan_index = $($task.PlanSelect)"
+                    }
                 }
             }
             "Recruit" {
-                if ($task.MaxTimes) { $lines += "times = $($task.MaxTimes)" }
-                if ($task.PreserveTagList) {
-                    $lines += "preserve_tags = `"$($task.PreserveTagList)`""
+                $levels = @()
+                if ($task.Level3Choose) { $levels += 3 }
+                if ($task.Level4Choose) { $levels += 4 }
+                if ($task.Level5Choose) { $levels += 5 }
+                if (Get-JsonPropertyValue -Object $task -Name "Level6Choose") { $levels += 6 }
+                if ($levels.Count -gt 0) {
+                    $paramLines += "select = $(ConvertTo-TomlNumberArray $levels)"
+                    $paramLines += "confirm = $(ConvertTo-TomlNumberArray $levels)"
+                }
+                if ($null -ne $task.ForceRefresh) {
+                    $paramLines += "refresh = $(ConvertTo-TomlBool $task.ForceRefresh)"
+                }
+                if ($null -ne $task.ExtraTagMode) {
+                    $paramLines += "extra_tags_mode = $($task.ExtraTagMode)"
+                }
+                if ($task.MaxTimes) { $paramLines += "times = $($task.MaxTimes)" }
+                if ($task.PreferTagEnabled -and $task.Level3PreferTags) {
+                    $paramLines += "first_tags = $(ConvertTo-TomlStringArray $task.Level3PreferTags)"
+                }
+                if ($task.PreserveTagEnabled -and $task.PreserveTagList) {
+                    $paramLines += "preserve_tags = $(ConvertTo-TomlStringArray $task.PreserveTagList)"
                 }
             }
             "Mall" {
                 if ($task.FirstList -and $task.FirstList -ne "") {
-                    $items = @(($task.FirstList -split ";").Trim() | Where-Object { $_ } | ForEach-Object { "`"$_`"" })
+                    $items = @(($task.FirstList -split ";").Trim() | Where-Object { $_ } | ForEach-Object { ConvertTo-TomlString $_ })
                     if ($items.Count -gt 0) {
-                        $lines += "buy_first = [$($items -join ", ")]"
+                        $paramLines += "buy_first = [$($items -join ", ")]"
                     }
                 }
                 if ($task.BlackList -and $task.BlackList -ne "") {
-                    $items = @(($task.BlackList -split ";").Trim() | Where-Object { $_ } | ForEach-Object { "`"$_`"" })
+                    $items = @(($task.BlackList -split ";").Trim() | Where-Object { $_ } | ForEach-Object { ConvertTo-TomlString $_ })
                     if ($items.Count -gt 0) {
-                        $lines += "blacklist = [$($items -join ", ")]"
+                        $paramLines += "blacklist = [$($items -join ", ")]"
                     }
                 }
             }
             "Award" {
                 if ($null -ne $task.FreeGacha) {
-                    $lines += "recruit = $($task.FreeGacha.ToString().ToLower())"
+                    $paramLines += "recruit = $($task.FreeGacha.ToString().ToLower())"
                 }
             }
+        }
+
+        if ($paramLines.Count -gt 0) {
+            $lines += "[tasks.params]"
+            $lines += $paramLines
         }
 
         $lines += ""
@@ -807,6 +923,8 @@ if ($AppId -eq "maa") {
         Write-Host "Skipping MAA download; validating existing files."
         Require-File (Join-Path $maaDir "MAA.exe")
         Require-File (Join-Path $maaDir "maa-cli.exe")
+        Write-Host "Syncing CLI config from GUI settings..."
+        Convert-MaaGuiToCliConfig -MaaDir $maaDir
         Update-InstallDirSetting -Root $Root -AppId "maa" -InstallDir $maaDir
         Update-InstallDirSetting -Root $Root -AppId "maa-gui" -InstallDir $maaDir
     }
