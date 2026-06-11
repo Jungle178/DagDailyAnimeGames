@@ -78,8 +78,8 @@ else {
 
 if ($Adb) {
     Write-Host "Cleaning ADB connection $Device..."
-    & $Adb disconnect $Device | Out-Null
-    & $Adb kill-server | Out-Null
+    & $Adb disconnect $Device *> $null
+    & $Adb kill-server *> $null
 }
 else {
     Write-Host "ADB not found; skipping ADB cleanup."

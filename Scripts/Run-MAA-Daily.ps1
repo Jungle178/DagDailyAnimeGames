@@ -237,6 +237,98 @@ function Require-File {
     }
 }
 
+function Resolve-PowerShellPath {
+    $windowsPowerShell = Join-Path $PSHOME "powershell.exe"
+    if (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf) {
+        return $windowsPowerShell
+    }
+
+    $pwsh = Join-Path $PSHOME "pwsh.exe"
+    if (Test-Path -LiteralPath $pwsh -PathType Leaf) {
+        return $pwsh
+    }
+
+    $command = Get-Command "powershell.exe" -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    $command = Get-Command "pwsh.exe" -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    throw "PowerShell executable was not found."
+}
+
+function Start-MaaCliConfigSyncJob {
+    param(
+        [string]$RootPath,
+        [string]$InstallDir
+    )
+
+    $installer = Join-Path $PSScriptRoot "Install-App.ps1"
+    Require-File $installer
+
+    Write-Host "Syncing maa-cli config from MAA GUI settings while MuMu starts..."
+    $powerShell = Resolve-PowerShellPath
+    Start-Job -ScriptBlock {
+        param(
+            [string]$PowerShellPath,
+            [string]$InstallerPath,
+            [string]$RootArg,
+            [string]$InstallDirArg
+        )
+
+        & $PowerShellPath -NoProfile -ExecutionPolicy Bypass -File $InstallerPath maa -Root $RootArg -MaaDir $InstallDirArg -SkipInstall *>&1
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            throw "Install-App.ps1 exited with code $exitCode"
+        }
+    } -ArgumentList $powerShell, $installer, $RootPath, $InstallDir
+}
+
+function Complete-MaaCliConfigSyncJob {
+    param([AllowNull()][object]$Job)
+
+    if ($null -eq $Job) {
+        return
+    }
+
+    Write-Host "Waiting for maa-cli config sync..."
+    Wait-Job -Job $Job | Out-Null
+    $output = @(Receive-Job -Job $Job -ErrorAction SilentlyContinue)
+    foreach ($line in $output) {
+        if ($null -ne $line -and [string]$line -ne "") {
+            Write-Host $line
+        }
+    }
+
+    $state = $Job.State
+    Remove-Job -Job $Job -Force
+    if ($state -ne "Completed") {
+        throw "Failed to sync maa-cli config; sync job state was $state"
+    }
+}
+
+function Stop-MaaCliConfigSyncJob {
+    param([AllowNull()][object]$Job)
+
+    if ($null -eq $Job) {
+        return
+    }
+
+    try {
+        if ($Job.State -eq "Running") {
+            Stop-Job -Job $Job -ErrorAction SilentlyContinue
+        }
+        Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Warning "Failed to clean maa-cli config sync job: $_"
+    }
+}
+
 function Wait-AdbDevice {
     param(
         [string]$AdbPath,
@@ -246,13 +338,13 @@ function Wait-AdbDevice {
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        & $AdbPath connect $Serial | Out-Null
+        & $AdbPath connect $Serial *> $null
         $devices = & $AdbPath devices
         if ($devices -match ([regex]::Escape($Serial) + "\s+device")) {
             return
         }
         if ($devices -match ([regex]::Escape($Serial) + "\s+offline")) {
-            & $AdbPath disconnect $Serial | Out-Null
+            & $AdbPath disconnect $Serial *> $null
         }
         Start-Sleep -Seconds 2
     }
@@ -295,11 +387,11 @@ function Reset-AdbConnection {
         [string]$Serial
     )
 
-    & $AdbPath disconnect $Serial | Out-Null
-    & $AdbPath kill-server | Out-Null
+    & $AdbPath disconnect $Serial *> $null
+    & $AdbPath kill-server *> $null
     Start-Sleep -Seconds 2
-    & $AdbPath start-server | Out-Null
-    & $AdbPath connect $Serial | Out-Null
+    & $AdbPath start-server *> $null
+    & $AdbPath connect $Serial *> $null
 }
 
 function Invoke-MaaCli {
@@ -328,6 +420,7 @@ $Adb = Resolve-AdbPath -ExplicitPath $Adb -MumuCliPath $MumuCli
 Require-File $MaaCli
 Require-File $MumuCli
 Require-File $Adb
+Require-File (Join-Path $MaaDir "MAA.exe")
 
 $maaArgs = @("--batch", "--no-summary")
 if (-not $Quiet) {
@@ -335,13 +428,17 @@ if (-not $Quiet) {
 }
 
 $adbReady = $false
+$syncJob = $null
 
 try {
     Write-Host "Launching MuMu vmindex $VmIndex..."
     & $MumuCli control --vmindex $VmIndex launch
+    $syncJob = Start-MaaCliConfigSyncJob -RootPath $Root -InstallDir $MaaDir
 
     Write-Host "Waiting for MuMu Android..."
     Wait-MuMuAndroid -MumuPath $MumuCli -Index $VmIndex -TimeoutSeconds $WaitSeconds
+    Complete-MaaCliConfigSyncJob -Job $syncJob
+    $syncJob = $null
 
     Write-Host "Resetting ADB connection $Device..."
     Reset-AdbConnection -AdbPath $Adb -Serial $Device
@@ -354,6 +451,8 @@ try {
     Invoke-MaaCli -Arguments (@("run", $TaskName) + $maaArgs)
 }
 finally {
+    Stop-MaaCliConfigSyncJob -Job $syncJob
+
     if ($adbReady) {
         Write-Host "Closing game client..."
         try {
@@ -377,8 +476,8 @@ finally {
 
     Write-Host "Cleaning ADB connection $Device..."
     try {
-        & $Adb disconnect $Device | Out-Null
-        & $Adb kill-server | Out-Null
+        & $Adb disconnect $Device *> $null
+        & $Adb kill-server *> $null
     }
     catch {
         Write-Warning "Failed to clean ADB connection: $_"

@@ -3,6 +3,7 @@ param(
     [ValidateSet("maa", "maa-gui", "bettergi", "wuthering", "endfield", "nte")]
     [string]$AppId,
     [string]$Root = "",
+    [string]$MaaDir = "",
     [switch]$SkipInstall
 )
 
@@ -472,6 +473,9 @@ function Convert-MaaGuiToCliConfig {
             "[[tasks]]",
             'name = "StartUp"',
             'type = "StartUp"',
+            "[tasks.params]",
+            'client_type = "Official"',
+            'start_game_enabled = true',
             "",
             "[[tasks]]",
             'name = "Fight"',
@@ -492,6 +496,12 @@ function Convert-MaaGuiToCliConfig {
             "[[tasks]]",
             'name = "Award"',
             'type = "Award"',
+            "",
+            "[[tasks]]",
+            'name = "CloseDown"',
+            'type = "CloseDown"',
+            "[tasks.params]",
+            'client_type = "Official"',
             ""
         ) -join [Environment]::NewLine
 
@@ -515,9 +525,8 @@ function Convert-MaaGuiToCliConfig {
     $guiConfig = Read-JsonObject $guiJsonPath
     $currentProfile = $guiConfig.Current
     if (-not $currentProfile) {
-        Write-Host "No current profile in gui.json; generating default CLI config."
-        & $writeDefaultDailyToml
-        return
+        Write-Host "No current profile in gui.json; falling back to 'Default'."
+        $currentProfile = "Default"
     }
 
     if (-not (Test-Path -LiteralPath $guiNewPath -PathType Leaf)) {
@@ -528,13 +537,20 @@ function Convert-MaaGuiToCliConfig {
 
     $guiNew = Read-JsonObject $guiNewPath
     $taskQueue = @()
-    if ($guiNew.PSObject.Properties.Name -contains "Configurations") {
-        $configs = $guiNew.Configurations
-        if ($configs -and $configs.PSObject.Properties.Name -contains $currentProfile) {
-            $profile = $configs.$currentProfile
-            if ($profile.PSObject.Properties.Name -contains "TaskQueue") {
-                $taskQueue = @($profile.TaskQueue)
+    $effectiveProfile = $currentProfile
+    $configs = Get-JsonPropertyValue -Object $guiNew -Name "Configurations"
+    if ($configs) {
+        $profile = Get-JsonPropertyValue -Object $configs -Name $currentProfile
+        if ((-not $profile) -and $currentProfile -ne "Default") {
+            Write-Host "GUI profile '$currentProfile' not found; falling back to 'Default'."
+            $profile = Get-JsonPropertyValue -Object $configs -Name "Default"
+            if ($profile) {
+                $effectiveProfile = "Default"
             }
+        }
+
+        if ($profile -and $profile.PSObject.Properties.Name -contains "TaskQueue") {
+            $taskQueue = @($profile.TaskQueue)
         }
     }
 
@@ -542,6 +558,30 @@ function Convert-MaaGuiToCliConfig {
         Write-Host "No tasks found in GUI profile '$currentProfile'; generating default CLI config."
         & $writeDefaultDailyToml
         return
+    }
+
+    function Get-MaaGuiProfileSetting {
+        param([string]$Name)
+
+        $configs = Get-JsonPropertyValue -Object $guiConfig -Name "Configurations"
+        foreach ($profileName in @($currentProfile, "Default")) {
+            if ([string]::IsNullOrWhiteSpace([string]$profileName)) {
+                continue
+            }
+
+            $profileSettings = Get-JsonPropertyValue -Object $configs -Name $profileName
+            $value = Get-JsonPropertyValue -Object $profileSettings -Name $Name
+            if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace([string]$value)) {
+                return $value
+            }
+        }
+
+        return $null
+    }
+
+    $clientType = [string](Get-MaaGuiProfileSetting -Name "Start.ClientType")
+    if ([string]::IsNullOrWhiteSpace($clientType)) {
+        $clientType = "Official"
     }
 
     $typeMap = @{
@@ -592,7 +632,7 @@ function Convert-MaaGuiToCliConfig {
     )
 
     foreach ($task in $taskQueue) {
-        if (-not $task.IsEnable) { continue }
+        if ((Get-JsonPropertyValue -Object $task -Name "IsEnable") -ne $true) { continue }
 
         $cliType = $typeMap[$task.TaskType]
         if (-not $cliType) {
@@ -610,6 +650,13 @@ function Convert-MaaGuiToCliConfig {
         $paramLines = @()
 
         switch ($task.TaskType) {
+            "StartUp" {
+                $paramLines += "client_type = $(ConvertTo-TomlString $clientType)"
+                $paramLines += "start_game_enabled = true"
+                if ($task.AccountName) {
+                    $paramLines += "account_name = $(ConvertTo-TomlString $task.AccountName)"
+                }
+            }
             "Fight" {
                 if ($task.StagePlan -and $task.StagePlan.Count -gt 0) {
                     $stage = @($task.StagePlan)[0]
@@ -721,6 +768,14 @@ function Convert-MaaGuiToCliConfig {
         Write-Host "  Converted: $name -> $cliType"
     }
 
+    $lines += "[[tasks]]"
+    $lines += 'name = "CloseDown"'
+    $lines += 'type = "CloseDown"'
+    $lines += "[tasks.params]"
+    $lines += "client_type = $(ConvertTo-TomlString $clientType)"
+    $lines += ""
+    Write-Host "  Appended: CloseDown -> CloseDown"
+
     if (-not (Test-Path -LiteralPath $cliTasksDir -PathType Container)) {
         New-Item -ItemType Directory -Path $cliTasksDir -Force | Out-Null
     }
@@ -732,7 +787,7 @@ function Convert-MaaGuiToCliConfig {
         [System.Text.UTF8Encoding]::new($false)
     )
     Write-Host "Converted GUI config to CLI: $dailyTomlPath"
-    Write-Host "  Profile: $currentProfile, Tasks converted: $($taskQueue.Where{ $_.IsEnable }.Count)"
+    Write-Host "  Profile: $effectiveProfile, Tasks converted: $(@($taskQueue | Where-Object { (Get-JsonPropertyValue -Object $_ -Name "IsEnable") -eq $true }).Count)"
 }
 
 function Install-MaaCli {
@@ -912,10 +967,15 @@ function Require-Git {
 }
 
 if ($AppId -eq "maa") {
-    $maaDir = Resolve-FirstDirectoryWithFile `
-        -Root $Root `
-        -RelativeDirectories (Get-MaaCandidateDirectories) `
-        -FileName "MAA.exe"
+    if ($MaaDir) {
+        $maaDir = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($MaaDir)
+    }
+    else {
+        $maaDir = Resolve-FirstDirectoryWithFile `
+            -Root $Root `
+            -RelativeDirectories (Get-MaaCandidateDirectories) `
+            -FileName "MAA.exe"
+    }
     if (-not $maaDir) {
         $maaDir = Join-Path $Root "Apps\MAA"
     }
@@ -936,10 +996,15 @@ if ($AppId -eq "maa") {
 }
 
 if ($AppId -eq "maa-gui") {
-    $maaDir = Resolve-FirstDirectoryWithFile `
-        -Root $Root `
-        -RelativeDirectories (Get-MaaCandidateDirectories) `
-        -FileName "MAA.exe"
+    if ($MaaDir) {
+        $maaDir = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($MaaDir)
+    }
+    else {
+        $maaDir = Resolve-FirstDirectoryWithFile `
+            -Root $Root `
+            -RelativeDirectories (Get-MaaCandidateDirectories) `
+            -FileName "MAA.exe"
+    }
     if (-not $maaDir) {
         $maaDir = Join-Path $Root "Apps\MAA"
     }
