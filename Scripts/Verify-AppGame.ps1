@@ -492,6 +492,60 @@ if (-not $processWindowInfo) {
 $processInfo = $processWindowInfo.Process
 $windowInfo = $processWindowInfo.Window
 $processPath = [string]$processInfo.ExecutablePath
+
+# Fallback: Get-CimInstance may not return ExecutablePath for protected/elevated processes
+if (-not $processPath) {
+    try {
+        $proc = Get-Process -Id $processInfo.ProcessId -ErrorAction SilentlyContinue
+        if ($proc -and $proc.Path) {
+            $processPath = $proc.Path
+        }
+    }
+    catch {}
+}
+
+# Second fallback: use kernel32 QueryFullProcessImageName for highly protected processes
+if (-not $processPath) {
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class LocalDailyProcessHelper
+{
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    public static string GetProcessPath(int processId)
+    {
+        IntPtr hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
+        if (hProcess == IntPtr.Zero) return "";
+        try
+        {
+            StringBuilder sb = new StringBuilder(1024);
+            uint size = (uint)sb.Capacity;
+            if (QueryFullProcessImageName(hProcess, 0, sb, ref size))
+                return sb.ToString();
+            return "";
+        }
+        finally { CloseHandle(hProcess); }
+    }
+}
+"@ -ErrorAction SilentlyContinue
+        $processPath = [LocalDailyProcessHelper]::GetProcessPath($processInfo.ProcessId)
+    }
+    catch {}
+}
+
 if ($processPath -and -not (Test-Path -LiteralPath $processPath -PathType Leaf)) {
     throw "Detected process path does not exist: $processPath"
 }

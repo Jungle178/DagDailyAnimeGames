@@ -628,9 +628,10 @@ class AppInstaller:
 
 
 class AppRunner:
-    def __init__(self, app: AppConfig, log_queue: queue.Queue[tuple[str, str]]):
+    def __init__(self, app: AppConfig, log_queue: queue.Queue[tuple[str, str]], settings: "Settings | None" = None):
         self.app = app
         self.log_queue = log_queue
+        self.settings = settings
         self.process: subprocess.Popen[str] | None = None
         self.log_file: Path | None = None
         self.lock = threading.Lock()
@@ -657,6 +658,15 @@ class AppRunner:
                 "-File",
                 str(self.app.script),
             ]
+
+            if self.app.requires_game_verification and self.settings is not None:
+                app_settings = self.settings.data["apps"].get(self.app.app_id, {})
+                game_path = settings_path_value(app_settings.get("game_path"))
+                if not (game_path and game_path.is_file()):
+                    game_path = saved_game_path_from_project(self.app)
+                if game_path and game_path.is_file():
+                    command.extend(["-GameExe", str(game_path)])
+
             self.log(f"启动: {' '.join(command)}")
             self.log(f"日志文件: {self.log_file}")
 
@@ -977,7 +987,7 @@ class DailyGui:
         self.settings.save()
         self.log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.installers = {app.app_id: AppInstaller(app, self.log_queue) for app in APPS}
-        self.runners = {app.app_id: AppRunner(app, self.log_queue) for app in APPS}
+        self.runners = {app.app_id: AppRunner(app, self.log_queue, self.settings) for app in APPS}
         self.rows: dict[str, TaskRow] = {}
         self.images: list[ImageTk.PhotoImage] = []
         self.window_icon: ImageTk.PhotoImage | None = None

@@ -50,15 +50,58 @@ function Get-FirstProcessPathByName {
     param([string]$Name)
 
     $processInfo = Get-CimInstance Win32_Process -Filter "Name = '$Name'" -ErrorAction SilentlyContinue |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) } |
         Sort-Object ProcessId |
         Select-Object -First 1
 
-    if ($processInfo) {
+    if (-not $processInfo) {
+        return ""
+    }
+
+    if ($processInfo.ExecutablePath) {
         return $processInfo.ExecutablePath
     }
 
-    return ""
+    # Fallback for protected/elevated processes where ExecutablePath is empty
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class OkWwProcessHelper
+{
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    public static string GetProcessPath(int processId)
+    {
+        IntPtr hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
+        if (hProcess == IntPtr.Zero) return "";
+        try
+        {
+            StringBuilder sb = new StringBuilder(1024);
+            uint size = (uint)sb.Capacity;
+            if (QueryFullProcessImageName(hProcess, 0, sb, ref size))
+                return sb.ToString();
+            return "";
+        }
+        finally { CloseHandle(hProcess); }
+    }
+}
+"@ -ErrorAction SilentlyContinue
+        return [OkWwProcessHelper]::GetProcessPath($processInfo.ProcessId)
+    }
+    catch {
+        return ""
+    }
 }
 
 function Get-CachedWutheringGamePath {

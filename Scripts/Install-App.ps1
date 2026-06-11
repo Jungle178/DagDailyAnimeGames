@@ -475,6 +475,9 @@ function Install-MaaCli {
     Write-Host "Installing maa-cli to: $cliTarget"
     Copy-Item -LiteralPath $cliExe.FullName -Destination $cliTarget -Force
     Require-File $cliTarget
+
+    Write-Host "Cleaning up download artifacts: $downloadDir"
+    Remove-Item -LiteralPath $downloadDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 function Install-MaaRelease {
@@ -530,6 +533,9 @@ function Install-MaaRelease {
     Require-File (Join-Path $installDir "maa-cli.exe")
     Write-Host "MAA release is ready: $installDir"
     Update-InstallDirSetting -Root $Root -AppId "maa" -InstallDir $installDir
+
+    Write-Host "Cleaning up download artifacts: $downloadDir"
+    Remove-Item -LiteralPath $downloadDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 function Install-BetterGiRelease {
@@ -577,6 +583,9 @@ function Install-BetterGiRelease {
     Require-File (Join-Path $installDir "BetterGI.exe")
     Write-Host "BetterGI release is ready: $installDir"
     Update-InstallDirSetting -Root $Root -AppId "bettergi" -InstallDir $installDir
+
+    Write-Host "Cleaning up download artifacts: $downloadDir"
+    Remove-Item -LiteralPath $downloadDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $Apps = @{
