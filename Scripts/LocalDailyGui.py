@@ -156,6 +156,7 @@ APPS: tuple[AppConfig, ...] = (
         workdir=ROOT,
         icon=ENDFIELD_ICON,
         default_times=(),
+        requires_game_verification=False,
     ),
     AppConfig(
         app_id="nte",
@@ -165,6 +166,7 @@ APPS: tuple[AppConfig, ...] = (
         workdir=ROOT,
         icon=NTE_ICON,
         default_times=(),
+        requires_game_verification=False,
     ),
 )
 

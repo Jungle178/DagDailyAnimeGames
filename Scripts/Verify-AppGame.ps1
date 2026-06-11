@@ -3,7 +3,7 @@ param(
     [ValidateSet("wuthering", "endfield", "nte")]
     [string]$AppId,
     [string]$Root = "",
-    [int]$TimeoutSeconds = 45
+    [int]$TimeoutSeconds = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -94,12 +94,21 @@ function Set-JsonProperty {
         [object]$Value
     )
 
-    if ($Object.PSObject.Properties.Name -contains $Name) {
+    if (Test-JsonProperty -Object $Object -Name $Name) {
         $Object.$Name = $Value
     }
     else {
         Add-Member -InputObject $Object -MemberType NoteProperty -Name $Name -Value $Value
     }
+}
+
+function Test-JsonProperty {
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    @($Object.PSObject.Properties | ForEach-Object { $_.Name }) -contains $Name
 }
 
 function Save-JsonObject {
@@ -127,7 +136,7 @@ function Get-OrCreateJsonObjectProperty {
         [string]$Name
     )
 
-    if (-not ($Object.PSObject.Properties.Name -contains $Name) -or $null -eq $Object.$Name) {
+    if (-not (Test-JsonProperty -Object $Object -Name $Name) -or $null -eq $Object.$Name) {
         Set-JsonProperty $Object $Name ([PSCustomObject]@{})
     }
 
@@ -144,7 +153,6 @@ function Get-RunningProcessInfo {
     while ($true) {
         $items = @(
             Get-CimInstance Win32_Process -Filter "Name = '$Name'" -ErrorAction SilentlyContinue |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) } |
                 Sort-Object ProcessId
         )
 
@@ -190,11 +198,56 @@ function Get-WindowSize {
     }
 }
 
+function Get-WindowInfo {
+    param([IntPtr]$Hwnd)
+
+    if ($Hwnd -eq [IntPtr]::Zero -or -not [LocalDailyWindowApi]::IsWindow($Hwnd)) {
+        return $null
+    }
+
+    $size = Get-WindowSize $Hwnd
+    [PSCustomObject]@{
+        Hwnd = $Hwnd
+        HwndValue = $Hwnd.ToInt64()
+        ClassName = Get-WindowClassName $Hwnd
+        Title = Get-WindowTitle $Hwnd
+        Width = $size.Width
+        Height = $size.Height
+        Visible = [LocalDailyWindowApi]::IsWindowVisible($Hwnd)
+        Minimized = [LocalDailyWindowApi]::IsIconic($Hwnd)
+    }
+}
+
+function Test-WindowInfoMatch {
+    param(
+        [object]$WindowInfo,
+        [string]$HwndClass = ""
+    )
+
+    if (-not $WindowInfo) {
+        return $false
+    }
+    if ($HwndClass -and $WindowInfo.ClassName -ne $HwndClass) {
+        return $false
+    }
+    return $WindowInfo.Width -gt 200 -and $WindowInfo.Height -gt 200
+}
+
 function Find-WindowForProcess {
     param(
         [int]$ProcessId,
         [string]$HwndClass = ""
     )
+
+    try {
+        $mainWindowHandle = [System.Diagnostics.Process]::GetProcessById($ProcessId).MainWindowHandle
+        $mainWindowInfo = Get-WindowInfo $mainWindowHandle
+        if (Test-WindowInfoMatch -WindowInfo $mainWindowInfo -HwndClass $HwndClass) {
+            return $mainWindowInfo
+        }
+    }
+    catch {
+    }
 
     $matches = [System.Collections.Generic.List[object]]::new()
     $callback = [LocalDailyWindowApi+EnumWindowsProc]{
@@ -215,17 +268,7 @@ function Find-WindowForProcess {
             return $true
         }
 
-        $size = Get-WindowSize $hwnd
-        [void]$matches.Add([PSCustomObject]@{
-            Hwnd = $hwnd
-            HwndValue = $hwnd.ToInt64()
-            ClassName = $className
-            Title = Get-WindowTitle $hwnd
-            Width = $size.Width
-            Height = $size.Height
-            Visible = [LocalDailyWindowApi]::IsWindowVisible($hwnd)
-            Minimized = [LocalDailyWindowApi]::IsIconic($hwnd)
-        })
+        [void]$matches.Add((Get-WindowInfo $hwnd))
         return $true
     }
 
@@ -258,7 +301,6 @@ function Get-RunningProcessWindowInfo {
     while ($true) {
         $items = @(
             Get-CimInstance Win32_Process -Filter "Name = '$Name'" -ErrorAction SilentlyContinue |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) } |
                 Sort-Object ProcessId
         )
 
@@ -305,11 +347,13 @@ function Update-DevicesConfig {
     $configPath = Join-Path $ProjectPath "configs\devices.json"
     $config = Read-JsonObject $configPath
     Set-JsonProperty $config "preferred" "pc"
-    Set-JsonProperty $config "pc_full_path" $ProcessPath
+    if (-not [string]::IsNullOrWhiteSpace($ProcessPath)) {
+        Set-JsonProperty $config "pc_full_path" $ProcessPath
+    }
     Set-JsonProperty $config "capture" "windows"
     Set-JsonProperty $config "selected_exe" $ProcessName
     Set-JsonProperty $config "selected_hwnd" $WindowInfo.HwndValue
-    if (-not ($config.PSObject.Properties.Name -contains "interaction")) {
+    if (-not (Test-JsonProperty -Object $config -Name "interaction")) {
         Set-JsonProperty $config "interaction" ""
     }
     Save-JsonObject $configPath $config
@@ -329,28 +373,30 @@ function Update-RootSettings {
     Set-JsonProperty $settings "settings_version" 6
 
     $apps = Get-OrCreateJsonObjectProperty -Object $settings -Name "apps"
-    if (-not ($apps.PSObject.Properties.Name -contains $AppId) -or $null -eq $apps.$AppId) {
+    if (-not (Test-JsonProperty -Object $apps -Name $AppId) -or $null -eq $apps.$AppId) {
         Set-JsonProperty $apps $AppId ([PSCustomObject]@{})
     }
 
     $appSettings = $apps.$AppId
-    Set-JsonProperty $appSettings "game_path" $ProcessPath
-    Set-JsonProperty $appSettings "game_dir" (Split-Path -Parent $ProcessPath)
+    if (-not [string]::IsNullOrWhiteSpace($ProcessPath)) {
+        Set-JsonProperty $appSettings "game_path" $ProcessPath
+        Set-JsonProperty $appSettings "game_dir" (Split-Path -Parent $ProcessPath)
+    }
     Set-JsonProperty $appSettings "game_hwnd" $WindowInfo.HwndValue
     Set-JsonProperty $appSettings "game_hwnd_class" $WindowInfo.ClassName
     Set-JsonProperty $appSettings "game_verified" $true
     Set-JsonProperty $appSettings "game_verified_at" (Get-Date).ToString("s")
-    if (-not ($appSettings.PSObject.Properties.Name -contains "enabled")) {
+    if (-not (Test-JsonProperty -Object $appSettings -Name "enabled")) {
         Set-JsonProperty $appSettings "enabled" $false
     }
-    if (-not ($appSettings.PSObject.Properties.Name -contains "times")) {
+    if (-not (Test-JsonProperty -Object $appSettings -Name "times")) {
         Set-JsonProperty $appSettings "times" @()
     }
 
-    if (-not ($settings.PSObject.Properties.Name -contains "last_runs")) {
+    if (-not (Test-JsonProperty -Object $settings -Name "last_runs")) {
         Set-JsonProperty $settings "last_runs" ([PSCustomObject]@{})
     }
-    if (-not ($settings.PSObject.Properties.Name -contains "log_archives")) {
+    if (-not (Test-JsonProperty -Object $settings -Name "log_archives")) {
         Set-JsonProperty $settings "log_archives" ([PSCustomObject]@{})
     }
 
@@ -445,17 +491,22 @@ if (-not $processWindowInfo) {
 
 $processInfo = $processWindowInfo.Process
 $windowInfo = $processWindowInfo.Window
-$processPath = $processInfo.ExecutablePath
-if (-not (Test-Path -LiteralPath $processPath -PathType Leaf)) {
+$processPath = [string]$processInfo.ExecutablePath
+if ($processPath -and -not (Test-Path -LiteralPath $processPath -PathType Leaf)) {
     throw "Detected process path does not exist: $processPath"
 }
 
-Write-Host "Found game process: pid=$($processInfo.ProcessId), path=$processPath"
+if ($processPath) {
+    Write-Host "Found game process: pid=$($processInfo.ProcessId), path=$processPath"
+}
+else {
+    Write-Host "Found game process: pid=$($processInfo.ProcessId), path=<unavailable>"
+}
 Write-Host "Found game window: hwnd=$($windowInfo.HwndValue), class=$($windowInfo.ClassName), size=$($windowInfo.Width)x$($windowInfo.Height), visible=$($windowInfo.Visible)"
 Update-DevicesConfig -ProjectPath $projectPath -ProcessName $processName -ProcessPath $processPath -WindowInfo $windowInfo
 Update-RootSettings -RootPath $Root -AppId $AppId -ProcessPath $processPath -WindowInfo $windowInfo
 
-if ($AppId -eq "nte") {
+if ($AppId -eq "nte" -and $processPath) {
     Update-NteLauncherConfig -ProjectPath $projectPath -GamePath $processPath
 }
 

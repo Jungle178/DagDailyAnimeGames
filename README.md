@@ -50,7 +50,7 @@ BetterGI 点击后会：
 
 如果你已经手动把 BetterGI release 放到 `src/BetterGI`，GUI 会自动识别、保存目录并直接运行。
 
-`ok-*` 的检测结果会写入根目录 `Setting.json`，并同步到各子项目自己的 `configs/` 目录，用于后续启动时定位游戏。未确认游戏位置的 `ok-*` 项目不会正式运行，也不会执行定时任务。MAA 运行时默认调用 MuMu 12 和 `maa-cli run daily`，任务配置仍使用 `maa-cli` 自己的配置目录。BetterGI 运行时默认执行 `BetterGI.exe startOneDragon`。
+`ok-end-field` 和 `ok-nte` 启动时由各自项目自己查找游戏窗口，不需要在 GUI 里确认游戏路径。`ok-wuthering-waves` 需要知道鸣潮游戏路径；GUI 会优先从运行中的鸣潮进程或它自己的 `configs/devices.json` 复制路径，并同步到根目录 `Setting.json`。MAA 运行时默认调用 MuMu 12 和 `maa-cli run daily`，任务配置仍使用 `maa-cli` 自己的配置目录。BetterGI 运行时默认执行 `BetterGI.exe startOneDragon`。
 
 根目录 `requirements.txt` 只包含 GUI 自身运行所需依赖。各游戏项目依赖在点击对应“安装”按钮时单独安装。
 
@@ -87,7 +87,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Scripts\Setup-OkSharedVenv
 - `Scripts/Setup.bat`：手动创建或更新 GUI 运行环境的隐藏入口。
 - `Scripts/LocalDailyGui.py`：Tkinter GUI 调度器。
 - `Scripts/Install-App.ps1`：按单个项目安装；`ok-*` 下载 submodule 并安装依赖，MAA/BetterGI 下载官方 release 包。
-- `Scripts/Verify-AppGame.ps1`：安装后确认本机游戏进程位置。
+- `Scripts/Verify-AppGame.ps1`：确认并缓存 `ok-wuthering-waves` 的本机游戏进程位置。
 - `Scripts/Run-MAA-Daily.ps1`：启动 MAA 日常任务，默认拉起 MuMu 12、连接 ADB 并执行 `maa-cli run daily`。
 - `Scripts/Stop-MAA-Daily.ps1`：强制退出 MAA 任务后清理 MuMu/ADB。
 - `Scripts/Start-BetterGI-OneDragon.ps1`：启动 BetterGI 一条龙任务，默认执行 `BetterGI.exe startOneDragon`。
