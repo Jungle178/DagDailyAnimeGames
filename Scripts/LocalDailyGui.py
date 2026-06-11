@@ -13,9 +13,11 @@ from pathlib import Path
 from tkinter import (
     BooleanVar,
     END,
+    HORIZONTAL,
     LEFT,
     RIGHT,
     BOTH,
+    VERTICAL,
     X,
     Y,
     Canvas,
@@ -55,13 +57,7 @@ LEGACY_SETTINGS_PATH = SCRIPTS / "LocalDailyGui.settings.json"
 POWERSHELL = "powershell.exe"
 CATCH_UP_MINUTES = 30
 SETTINGS_VERSION = 6
-LEGACY_DEFAULT_TIMES = {
-    "maa": ["00:00", "19:00"],
-    "bettergi": ["04:30"],
-    "wuthering": ["00:00"],
-    "endfield": ["07:00"],
-    "nte": ["07:00"],
-}
+LEGACY_DEFAULT_TIMES: dict[str, list[str]] = {}
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 TASK_PROCESS_FLAGS = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -85,13 +81,36 @@ class AppConfig:
 
 APPS: tuple[AppConfig, ...] = (
     AppConfig(
-        app_id="maa",
+        app_id="maa-gui",
         name="MAA-明日方舟",
+        project_dir=ROOT / "Apps" / "MAA",
+        script=SCRIPTS / "Run-MAA-GUI.ps1",
+        workdir=ROOT,
+        icon=MAA_ICON,
+        default_times=(),
+        installed_file_sets=(
+            (SRC_DIR / "MAA" / "MAA.exe",),
+            (SRC_DIR / "MaaAssistantArknights" / "MAA.exe",),
+            (ROOT / "Apps" / "MAA" / "MAA.exe",),
+        ),
+        initialization_file_sets=(
+            (SRC_DIR / "MAA" / "MAA.exe",),
+            (SRC_DIR / "MaaAssistantArknights" / "MAA.exe",),
+            (ROOT / "Apps" / "MAA" / "MAA.exe",),
+        ),
+        requires_game_verification=False,
+        cleanup_commands=(
+            ("taskkill", "/IM", "MAA.exe", "/T", "/F"),
+        ),
+    ),
+    AppConfig(
+        app_id="maa",
+        name="MAA-cli",
         project_dir=ROOT / "Apps" / "MAA",
         script=SCRIPTS / "Run-MAA-Daily.ps1",
         workdir=ROOT,
         icon=MAA_ICON,
-        default_times=("00:00", "19:00"),
+        default_times=(),
         installed_file_sets=(
             (
                 SRC_DIR / "MAA" / "MAA.exe",
@@ -130,7 +149,7 @@ APPS: tuple[AppConfig, ...] = (
         script=SCRIPTS / "Start-BetterGI-OneDragon.ps1",
         workdir=ROOT,
         icon=BETTERGI_ICON,
-        default_times=("04:30",),
+        default_times=(),
         installed_file_sets=(
             (SRC_DIR / "BetterGI" / "BetterGI.exe",),
             (SRC_DIR / "better-genshin-impact" / "BetterGI.exe",),
@@ -172,10 +191,12 @@ APPS: tuple[AppConfig, ...] = (
 
 INSTALL_DIR_MARKERS = {
     "maa": ("MAA.exe", "maa-cli.exe"),
+    "maa-gui": ("MAA.exe",),
     "bettergi": ("BetterGI.exe",),
 }
 INITIALIZATION_DIR_MARKERS = {
     "maa": ("MAA.exe",),
+    "maa-gui": ("MAA.exe",),
 }
 GAME_PROCESS_NAMES = {
     "wuthering": "Client-Win64-Shipping.exe",
@@ -995,8 +1016,8 @@ class DailyGui:
 
         self.root = Tk()
         self.root.title("DAG二游日常")
-        self.root.geometry("1080x640")
-        self.root.minsize(980, 560)
+        self.root.geometry("1300x720")
+        self.root.minsize(1300, 400)
         self.root.configure(bg="#f7f7f4")
         self.window_icon = load_window_icon()
         if self.window_icon is not None:
@@ -1024,12 +1045,37 @@ class DailyGui:
         left = Frame(outer, bg="#f7f7f4")
         left.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 18))
 
+        left_canvas = Canvas(left, bg="#f7f7f4", highlightthickness=0)
+        left_scrollbar = Scrollbar(left, orient=VERTICAL, command=left_canvas.yview)
+        left_scrollbar.pack(side=RIGHT, fill=Y)
+        left_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        left_canvas.configure(yscrollcommand=left_scrollbar.set)
+
+        left_inner = Frame(left_canvas, bg="#f7f7f4")
+        left_inner_id = left_canvas.create_window((0, 0), window=left_inner, anchor="nw")
+
+        def _on_canvas_configure(event: "Event[Canvas]") -> None:
+            left_canvas.itemconfig(left_inner_id, width=event.width)
+
+        left_canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_inner_configure(event: "Event[Frame]") -> None:
+            left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+
+        left_inner.bind("<Configure>", _on_inner_configure)
+
+        def _on_mousewheel(event: "Event[Canvas]") -> None:
+            left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        left_canvas.bind("<Enter>", lambda _e: left_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        left_canvas.bind("<Leave>", lambda _e: left_canvas.unbind_all("<MouseWheel>"))
+
         right = Frame(outer, bg="#f7f7f4", highlightbackground="#8a8a8a", highlightthickness=1)
         right.pack(side=RIGHT, fill=Y)
 
         for app in APPS:
             row = TaskRow(
-                left,
+                left_inner,
                 app,
                 self.runners[app.app_id],
                 self.installers[app.app_id],
@@ -1050,8 +1096,8 @@ class DailyGui:
 
         log_container = Frame(right, bg="#f7f7f4")
         log_container.pack(fill=BOTH, expand=True, padx=10, pady=(0, 10))
-        scrollbar = Scrollbar(log_container)
-        scrollbar.pack(side=RIGHT, fill=Y)
+        log_scrollbar = Scrollbar(log_container)
+        log_scrollbar.pack(side=RIGHT, fill=Y)
         self.log_text = Text(
             log_container,
             width=44,
@@ -1060,10 +1106,10 @@ class DailyGui:
             font=("Consolas", 10),
             bg="#fcfcfa",
             fg="#1f1f1f",
-            yscrollcommand=scrollbar.set,
+            yscrollcommand=log_scrollbar.set,
         )
         self.log_text.pack(side=LEFT, fill=BOTH, expand=True)
-        scrollbar.config(command=self.log_text.yview)
+        log_scrollbar.config(command=self.log_text.yview)
 
         self.log("system", "GUI 已启动。定时检查每 10 秒执行一次。")
 
@@ -1108,7 +1154,7 @@ class DailyGui:
 
         if not messagebox.askokcancel(
             "确认游戏位置",
-            f"请先打开 {app.name} 的 PC 游戏窗口。\n\n"
+            f"请先打开 {app.name.replace('ok-', '')}游戏窗口。\n\n"
             "打开并等待游戏窗口出现后，点击“确定”开始检测。\n"
             "如果还没准备好，可以取消，之后再点“确认游戏”。",
             parent=self.root,

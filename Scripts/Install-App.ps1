@@ -668,4 +668,34 @@ else {
     Write-Host "Skipping dependency installation."
 }
 
+# Preset ok-framework configs for submodule apps
+$PresetApps = @("wuthering", "endfield", "nte")
+if ($PresetApps -contains $AppId) {
+    $ConfigsDir = Join-Path $ProjectPath "configs"
+
+    # ui_config.json: set light theme
+    $UiConfigPath = Join-Path $ConfigsDir "ui_config.json"
+    $uiConfig = Read-JsonObject $UiConfigPath
+    $qfw = if ($uiConfig.PSObject.Properties.Name -contains "QFluentWidgets") {
+        $uiConfig.QFluentWidgets
+    } else {
+        [PSCustomObject]@{}
+    }
+    if ($qfw.PSObject.Properties.Name -contains "ThemeMode") {
+        $qfw.ThemeMode = "Light"
+    } else {
+        Add-Member -InputObject $qfw -MemberType NoteProperty -Name "ThemeMode" -Value "Light"
+    }
+    Set-JsonProperty $uiConfig "QFluentWidgets" $qfw
+    Save-JsonObject $UiConfigPath $uiConfig
+    Write-Host "  Preset: QFluentWidgets.ThemeMode = Light"
+
+    # DailyTask.json: set exit after task (merge, don't overwrite other fields)
+    $DailyConfigPath = Join-Path $ConfigsDir "DailyTask.json"
+    $dailyConfig = Read-JsonObject $DailyConfigPath
+    Set-JsonProperty $dailyConfig "Exit After Task" $true
+    Save-JsonObject $DailyConfigPath $dailyConfig
+    Write-Host "  Preset: Exit After Task = true"
+}
+
 Write-Host "$($App.Name) is ready."
