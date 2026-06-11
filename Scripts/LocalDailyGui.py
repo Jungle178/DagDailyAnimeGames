@@ -984,7 +984,7 @@ class DailyGui:
         self.pending_scheduled: list[AppConfig] = []
 
         self.root = Tk()
-        self.root.title("本地日常调度器")
+        self.root.title("DAG二游日常")
         self.root.geometry("1080x640")
         self.root.minsize(980, 560)
         self.root.configure(bg="#f7f7f4")
