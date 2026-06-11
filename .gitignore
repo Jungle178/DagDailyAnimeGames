@@ -6,8 +6,13 @@ __pycache__/
 Logs/
 *.log
 *.logs
+Setting.json
 Scripts/LocalDailyGui.settings.json
 Apps/
+src/MAA/
+src/MaaAssistantArknights/
+src/BetterGI/
+src/better-genshin-impact/
 AGENTS.md
 
 .env

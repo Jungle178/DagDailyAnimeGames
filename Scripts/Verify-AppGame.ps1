@@ -69,6 +69,19 @@ function Save-JsonObject {
     )
 }
 
+function Get-OrCreateJsonObjectProperty {
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    if (-not ($Object.PSObject.Properties.Name -contains $Name) -or $null -eq $Object.$Name) {
+        Set-JsonProperty $Object $Name ([PSCustomObject]@{})
+    }
+
+    $Object.$Name
+}
+
 function Get-RunningProcessInfo {
     param(
         [string]$Name,
@@ -114,6 +127,45 @@ function Update-DevicesConfig {
     }
     Save-JsonObject $configPath $config
     Write-Host "Updated devices config: $configPath"
+}
+
+function Update-RootSettings {
+    param(
+        [string]$RootPath,
+        [string]$AppId,
+        [string]$ProcessPath
+    )
+
+    $settingsPath = Join-Path $RootPath "Setting.json"
+    $settings = Read-JsonObject $settingsPath
+    Set-JsonProperty $settings "settings_version" 6
+
+    $apps = Get-OrCreateJsonObjectProperty -Object $settings -Name "apps"
+    if (-not ($apps.PSObject.Properties.Name -contains $AppId) -or $null -eq $apps.$AppId) {
+        Set-JsonProperty $apps $AppId ([PSCustomObject]@{})
+    }
+
+    $appSettings = $apps.$AppId
+    Set-JsonProperty $appSettings "game_path" $ProcessPath
+    Set-JsonProperty $appSettings "game_dir" (Split-Path -Parent $ProcessPath)
+    Set-JsonProperty $appSettings "game_verified" $true
+    Set-JsonProperty $appSettings "game_verified_at" (Get-Date).ToString("s")
+    if (-not ($appSettings.PSObject.Properties.Name -contains "enabled")) {
+        Set-JsonProperty $appSettings "enabled" $false
+    }
+    if (-not ($appSettings.PSObject.Properties.Name -contains "times")) {
+        Set-JsonProperty $appSettings "times" @()
+    }
+
+    if (-not ($settings.PSObject.Properties.Name -contains "last_runs")) {
+        Set-JsonProperty $settings "last_runs" ([PSCustomObject]@{})
+    }
+    if (-not ($settings.PSObject.Properties.Name -contains "log_archives")) {
+        Set-JsonProperty $settings "log_archives" ([PSCustomObject]@{})
+    }
+
+    Save-JsonObject $settingsPath $settings
+    Write-Host "Updated root settings: $settingsPath"
 }
 
 function Get-NteLauncherPath {
@@ -203,6 +255,7 @@ if (-not (Test-Path -LiteralPath $processPath -PathType Leaf)) {
 
 Write-Host "Found game process: pid=$($processInfo.ProcessId), path=$processPath"
 Update-DevicesConfig -ProjectPath $projectPath -ProcessName $processName -ProcessPath $processPath
+Update-RootSettings -RootPath $Root -AppId $AppId -ProcessPath $processPath
 
 if ($AppId -eq "nte") {
     Update-NteLauncherConfig -ProjectPath $projectPath -GamePath $processPath

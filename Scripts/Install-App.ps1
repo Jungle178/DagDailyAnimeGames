@@ -39,6 +39,115 @@ function Require-File {
     }
 }
 
+function Read-JsonObject {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [PSCustomObject]@{}
+    }
+
+    try {
+        $text = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return [PSCustomObject]@{}
+        }
+        return $text | ConvertFrom-Json
+    }
+    catch {
+        Write-Warning "Ignoring invalid json file: $Path"
+        return [PSCustomObject]@{}
+    }
+}
+
+function Set-JsonProperty {
+    param(
+        [object]$Object,
+        [string]$Name,
+        [object]$Value
+    )
+
+    if ($Object.PSObject.Properties.Name -contains $Name) {
+        $Object.$Name = $Value
+    }
+    else {
+        Add-Member -InputObject $Object -MemberType NoteProperty -Name $Name -Value $Value
+    }
+}
+
+function Save-JsonObject {
+    param(
+        [string]$Path,
+        [object]$Object
+    )
+
+    $directory = Split-Path -Parent $Path
+    if ($directory -and -not (Test-Path -LiteralPath $directory -PathType Container)) {
+        New-Item -ItemType Directory -Path $directory | Out-Null
+    }
+
+    $json = $Object | ConvertTo-Json -Depth 8
+    [System.IO.File]::WriteAllText(
+        $Path,
+        $json + [Environment]::NewLine,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+
+function Get-OrCreateJsonObjectProperty {
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    if (-not ($Object.PSObject.Properties.Name -contains $Name) -or $null -eq $Object.$Name) {
+        Set-JsonProperty $Object $Name ([PSCustomObject]@{})
+    }
+
+    $Object.$Name
+}
+
+function Update-InstallDirSetting {
+    param(
+        [string]$Root,
+        [string]$AppId,
+        [string]$InstallDir
+    )
+
+    $settingsPath = Join-Path $Root "Setting.json"
+    $defaultTimes = @{
+        maa = @("00:00", "19:00")
+        bettergi = @("04:30")
+    }
+    $settings = Read-JsonObject $settingsPath
+    Set-JsonProperty $settings "settings_version" 6
+
+    $apps = Get-OrCreateJsonObjectProperty -Object $settings -Name "apps"
+    if (-not ($apps.PSObject.Properties.Name -contains $AppId) -or $null -eq $apps.$AppId) {
+        Set-JsonProperty $apps $AppId ([PSCustomObject]@{})
+    }
+
+    $appSettings = $apps.$AppId
+    $resolvedInstallDir = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
+    Set-JsonProperty $appSettings "install_dir" $resolvedInstallDir
+    Set-JsonProperty $appSettings "game_verified" $true
+    if (-not ($appSettings.PSObject.Properties.Name -contains "enabled")) {
+        Set-JsonProperty $appSettings "enabled" $false
+    }
+    if (-not ($appSettings.PSObject.Properties.Name -contains "times")) {
+        Set-JsonProperty $appSettings "times" $defaultTimes[$AppId]
+    }
+
+    if (-not ($settings.PSObject.Properties.Name -contains "last_runs")) {
+        Set-JsonProperty $settings "last_runs" ([PSCustomObject]@{})
+    }
+    if (-not ($settings.PSObject.Properties.Name -contains "log_archives")) {
+        Set-JsonProperty $settings "log_archives" ([PSCustomObject]@{})
+    }
+
+    Save-JsonObject $settingsPath $settings
+    Write-Host "Updated root settings: $settingsPath"
+}
+
 function Add-PathEntry {
     param([string]$Path)
 
@@ -206,13 +315,101 @@ function Copy-DirectoryContents {
     }
 }
 
+function Resolve-FirstDirectoryWithFile {
+    param(
+        [string]$Root,
+        [string[]]$RelativeDirectories,
+        [string]$FileName
+    )
+
+    foreach ($relativeDirectory in $RelativeDirectories) {
+        $candidate = Join-Path $Root $relativeDirectory
+        if (Test-Path -LiteralPath (Join-Path $candidate $FileName) -PathType Leaf) {
+            return $candidate
+        }
+    }
+
+    return ""
+}
+
+function Get-MaaCandidateDirectories {
+    @(
+        "src\MAA",
+        "src\MaaAssistantArknights",
+        "Apps\MAA"
+    )
+}
+
+function Get-BetterGiCandidateDirectories {
+    @(
+        "src\BetterGI",
+        "src\better-genshin-impact",
+        "Apps\BetterGI"
+    )
+}
+
+function Install-MaaCli {
+    param(
+        [string]$Root,
+        [string]$MaaDir
+    )
+
+    $downloadDir = Join-Path $Root "Apps\_downloads"
+    $cliExtractDir = Join-Path $downloadDir "maa-cli"
+
+    if (-not (Test-Path -LiteralPath $downloadDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $downloadDir | Out-Null
+    }
+
+    $cliRelease = Get-GitHubLatestRelease "MaaAssistantArknights/maa-cli"
+    $cliAsset = Select-ReleaseAsset `
+        -Release $cliRelease `
+        -Description "maa-cli Windows x64" `
+        -Patterns @(
+            "^maa_cli-.*-x86_64-pc-windows-msvc\.zip$",
+            "^maa-cli-.*-x86_64-pc-windows-msvc\.zip$",
+            "^maa(?!.*winget).*x86_64-pc-windows-msvc.*\.zip$"
+        )
+    $cliZip = Join-Path $downloadDir $cliAsset.name
+    Save-ReleaseAsset -Asset $cliAsset -Destination $cliZip
+    Expand-ZipAsset -ZipPath $cliZip -Destination $cliExtractDir
+
+    $cliExe = Get-ChildItem -LiteralPath $cliExtractDir -Recurse -File |
+        Where-Object { $_.Name -in @("maa.exe", "maa-cli.exe") } |
+        Select-Object -First 1
+    if (-not $cliExe) {
+        throw "maa-cli executable was not found in downloaded release: $cliZip"
+    }
+
+    $cliTarget = Join-Path $MaaDir "maa-cli.exe"
+    Write-Host "Installing maa-cli to: $cliTarget"
+    Copy-Item -LiteralPath $cliExe.FullName -Destination $cliTarget -Force
+    Require-File $cliTarget
+}
+
 function Install-MaaRelease {
     param([string]$Root)
+
+    $existingMaaDir = Resolve-FirstDirectoryWithFile `
+        -Root $Root `
+        -RelativeDirectories (Get-MaaCandidateDirectories) `
+        -FileName "MAA.exe"
+    if ($existingMaaDir) {
+        Write-Host "Detected existing MAA release: $existingMaaDir"
+        if (-not (Test-Path -LiteralPath (Join-Path $existingMaaDir "maa-cli.exe") -PathType Leaf)) {
+            Write-Host "maa-cli is missing; initializing existing MAA directory."
+            Install-MaaCli -Root $Root -MaaDir $existingMaaDir
+        }
+        Require-File (Join-Path $existingMaaDir "MAA.exe")
+        Require-File (Join-Path $existingMaaDir "maa-cli.exe")
+        Write-Host "MAA release is ready: $existingMaaDir"
+        Update-InstallDirSetting -Root $Root -AppId "maa" -InstallDir $existingMaaDir
+        return
+    }
 
     $installDir = Join-Path $Root "Apps\MAA"
     $downloadDir = Join-Path $Root "Apps\_downloads"
     $maaExtractDir = Join-Path $downloadDir "maa-release"
-    $cliExtractDir = Join-Path $downloadDir "maa-cli"
 
     if (-not (Test-Path -LiteralPath $downloadDir -PathType Container)) {
         New-Item -ItemType Directory -Path $downloadDir | Out-Null
@@ -237,37 +434,28 @@ function Install-MaaRelease {
     Write-Host "Installing MAA release to: $installDir"
     Copy-DirectoryContents -Source $maaSourceDir -Destination $installDir -PreserveExistingNames @("config")
 
-    $cliRelease = Get-GitHubLatestRelease "MaaAssistantArknights/maa-cli"
-    $cliAsset = Select-ReleaseAsset `
-        -Release $cliRelease `
-        -Description "maa-cli Windows x64" `
-        -Patterns @(
-            "^maa_cli-.*-x86_64-pc-windows-msvc\.zip$",
-            "^maa-cli-.*-x86_64-pc-windows-msvc\.zip$",
-            "^maa(?!.*winget).*x86_64-pc-windows-msvc.*\.zip$"
-        )
-    $cliZip = Join-Path $downloadDir $cliAsset.name
-    Save-ReleaseAsset -Asset $cliAsset -Destination $cliZip
-    Expand-ZipAsset -ZipPath $cliZip -Destination $cliExtractDir
-
-    $cliExe = Get-ChildItem -LiteralPath $cliExtractDir -Recurse -File |
-        Where-Object { $_.Name -in @("maa.exe", "maa-cli.exe") } |
-        Select-Object -First 1
-    if (-not $cliExe) {
-        throw "maa-cli executable was not found in downloaded release: $cliZip"
-    }
-
-    $cliTarget = Join-Path $installDir "maa-cli.exe"
-    Write-Host "Installing maa-cli to: $cliTarget"
-    Copy-Item -LiteralPath $cliExe.FullName -Destination $cliTarget -Force
+    Install-MaaCli -Root $Root -MaaDir $installDir
 
     Require-File (Join-Path $installDir "MAA.exe")
-    Require-File $cliTarget
+    Require-File (Join-Path $installDir "maa-cli.exe")
     Write-Host "MAA release is ready: $installDir"
+    Update-InstallDirSetting -Root $Root -AppId "maa" -InstallDir $installDir
 }
 
 function Install-BetterGiRelease {
     param([string]$Root)
+
+    $existingBetterGiDir = Resolve-FirstDirectoryWithFile `
+        -Root $Root `
+        -RelativeDirectories (Get-BetterGiCandidateDirectories) `
+        -FileName "BetterGI.exe"
+    if ($existingBetterGiDir) {
+        Require-File (Join-Path $existingBetterGiDir "BetterGI.exe")
+        Write-Host "Detected existing BetterGI release: $existingBetterGiDir"
+        Write-Host "BetterGI release is ready: $existingBetterGiDir"
+        Update-InstallDirSetting -Root $Root -AppId "bettergi" -InstallDir $existingBetterGiDir
+        return
+    }
 
     $installDir = Join-Path $Root "Apps\BetterGI"
     $downloadDir = Join-Path $Root "Apps\_downloads"
@@ -298,6 +486,7 @@ function Install-BetterGiRelease {
 
     Require-File (Join-Path $installDir "BetterGI.exe")
     Write-Host "BetterGI release is ready: $installDir"
+    Update-InstallDirSetting -Root $Root -AppId "bettergi" -InstallDir $installDir
 }
 
 $Apps = @{
@@ -313,11 +502,18 @@ $Root = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
 Use-GitRuntimePath
 
 if ($AppId -eq "maa") {
-    $maaDir = Join-Path $Root "Apps\MAA"
+    $maaDir = Resolve-FirstDirectoryWithFile `
+        -Root $Root `
+        -RelativeDirectories (Get-MaaCandidateDirectories) `
+        -FileName "MAA.exe"
+    if (-not $maaDir) {
+        $maaDir = Join-Path $Root "Apps\MAA"
+    }
     if ($SkipInstall) {
         Write-Host "Skipping MAA download; validating existing files."
         Require-File (Join-Path $maaDir "MAA.exe")
         Require-File (Join-Path $maaDir "maa-cli.exe")
+        Update-InstallDirSetting -Root $Root -AppId "maa" -InstallDir $maaDir
     }
     else {
         Install-MaaRelease -Root $Root
@@ -327,10 +523,17 @@ if ($AppId -eq "maa") {
 }
 
 if ($AppId -eq "bettergi") {
-    $betterGiDir = Join-Path $Root "Apps\BetterGI"
+    $betterGiDir = Resolve-FirstDirectoryWithFile `
+        -Root $Root `
+        -RelativeDirectories (Get-BetterGiCandidateDirectories) `
+        -FileName "BetterGI.exe"
+    if (-not $betterGiDir) {
+        $betterGiDir = Join-Path $Root "Apps\BetterGI"
+    }
     if ($SkipInstall) {
         Write-Host "Skipping BetterGI download; validating existing files."
         Require-File (Join-Path $betterGiDir "BetterGI.exe")
+        Update-InstallDirSetting -Root $Root -AppId "bettergi" -InstallDir $betterGiDir
     }
     else {
         Install-BetterGiRelease -Root $Root

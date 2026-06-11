@@ -11,8 +11,91 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+function Get-EnvValue {
+    param([string]$Name)
+
+    [Environment]::GetEnvironmentVariable($Name)
+}
+
+function Get-JsonPropertyValue {
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object) {
+        return $null
+    }
+    if ($Object.PSObject.Properties.Name -contains $Name) {
+        return $Object.$Name
+    }
+    return $null
+}
+
+function Get-SettingInstallDir {
+    param(
+        [string]$RootPath,
+        [string]$AppId
+    )
+
+    $settingsPath = Join-Path $RootPath "Setting.json"
+    if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+        return ""
+    }
+
+    try {
+        $settings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        return ""
+    }
+
+    $apps = Get-JsonPropertyValue -Object $settings -Name "apps"
+    $appSettings = Get-JsonPropertyValue -Object $apps -Name $AppId
+    $installDir = Get-JsonPropertyValue -Object $appSettings -Name "install_dir"
+    if ([string]::IsNullOrWhiteSpace([string]$installDir)) {
+        return ""
+    }
+
+    [string]$installDir
+}
+
+function Resolve-BetterGiDirectory {
+    param(
+        [string]$ExplicitDirectory,
+        [string]$RootPath
+    )
+
+    $envDir = Get-EnvValue "BETTERGI_DIR"
+    $settingDir = Get-SettingInstallDir -RootPath $RootPath -AppId "bettergi"
+    $candidates = @(
+        $ExplicitDirectory,
+        $envDir,
+        $settingDir,
+        (Join-Path $RootPath "src\BetterGI"),
+        (Join-Path $RootPath "src\better-genshin-impact"),
+        (Join-Path $RootPath "Apps\BetterGI")
+    )
+
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+        $candidateExe = Join-Path $candidate "BetterGI.exe"
+        if (Test-Path -LiteralPath $candidateExe -PathType Leaf) {
+            return $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($candidate)
+        }
+    }
+
+    if ($ExplicitDirectory) {
+        return $ExplicitDirectory
+    }
+
+    return Join-Path $RootPath "Apps\BetterGI"
+}
+
 if (-not $WorkingDirectory) {
-    $WorkingDirectory = Join-Path $Root "Apps\BetterGI"
+    $WorkingDirectory = Resolve-BetterGiDirectory -ExplicitDirectory $WorkingDirectory -RootPath $Root
 }
 
 if (-not $ExePath) {

@@ -43,10 +43,11 @@ SRC_DIR = ROOT / "src"
 SCRIPTS = ROOT / "Scripts"
 LOG_DIR = ROOT / "Logs" / "LocalDailyGui"
 LOG_ARCHIVE_DIR = ROOT / "Logs"
-SETTINGS_PATH = SCRIPTS / "LocalDailyGui.settings.json"
+SETTINGS_PATH = ROOT / "Setting.json"
+LEGACY_SETTINGS_PATH = SCRIPTS / "LocalDailyGui.settings.json"
 POWERSHELL = "powershell.exe"
 CATCH_UP_MINUTES = 30
-SETTINGS_VERSION = 5
+SETTINGS_VERSION = 6
 LEGACY_DEFAULT_TIMES = {
     "maa": ["00:00", "19:00"],
     "bettergi": ["04:30"],
@@ -69,7 +70,8 @@ class AppConfig:
     workdir: Path
     icon: Path | None
     default_times: tuple[str, ...]
-    installed_files: tuple[Path, ...] = ()
+    installed_file_sets: tuple[tuple[Path, ...], ...] = ()
+    initialization_file_sets: tuple[tuple[Path, ...], ...] = ()
     requires_game_verification: bool = True
     cleanup_commands: tuple[tuple[str, ...], ...] = ()
 
@@ -83,9 +85,24 @@ APPS: tuple[AppConfig, ...] = (
         workdir=ROOT,
         icon=None,
         default_times=("00:00", "19:00"),
-        installed_files=(
-            ROOT / "Apps" / "MAA" / "MAA.exe",
-            ROOT / "Apps" / "MAA" / "maa-cli.exe",
+        installed_file_sets=(
+            (
+                SRC_DIR / "MAA" / "MAA.exe",
+                SRC_DIR / "MAA" / "maa-cli.exe",
+            ),
+            (
+                SRC_DIR / "MaaAssistantArknights" / "MAA.exe",
+                SRC_DIR / "MaaAssistantArknights" / "maa-cli.exe",
+            ),
+            (
+                ROOT / "Apps" / "MAA" / "MAA.exe",
+                ROOT / "Apps" / "MAA" / "maa-cli.exe",
+            ),
+        ),
+        initialization_file_sets=(
+            (SRC_DIR / "MAA" / "MAA.exe",),
+            (SRC_DIR / "MaaAssistantArknights" / "MAA.exe",),
+            (ROOT / "Apps" / "MAA" / "MAA.exe",),
         ),
         requires_game_verification=False,
         cleanup_commands=(
@@ -107,8 +124,10 @@ APPS: tuple[AppConfig, ...] = (
         workdir=ROOT,
         icon=None,
         default_times=("04:30",),
-        installed_files=(
-            ROOT / "Apps" / "BetterGI" / "BetterGI.exe",
+        installed_file_sets=(
+            (SRC_DIR / "BetterGI" / "BetterGI.exe",),
+            (SRC_DIR / "better-genshin-impact" / "BetterGI.exe",),
+            (ROOT / "Apps" / "BetterGI" / "BetterGI.exe",),
         ),
         requires_game_verification=False,
         cleanup_commands=(("taskkill", "/IM", "BetterGI.exe", "/T", "/F"),),
@@ -142,6 +161,19 @@ APPS: tuple[AppConfig, ...] = (
     ),
 )
 
+INSTALL_DIR_MARKERS = {
+    "maa": ("MAA.exe", "maa-cli.exe"),
+    "bettergi": ("BetterGI.exe",),
+}
+INITIALIZATION_DIR_MARKERS = {
+    "maa": ("MAA.exe",),
+}
+GAME_PROCESS_NAMES = {
+    "wuthering": "Client-Win64-Shipping.exe",
+    "endfield": "Endfield.exe",
+    "nte": "HTGame.exe",
+}
+
 
 def ensure_dirs() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -170,56 +202,193 @@ def validate_times(raw: str) -> list[str]:
 
 
 def app_installed(app: AppConfig) -> bool:
-    if app.installed_files:
-        return all(path.is_file() for path in app.installed_files)
+    if app.installed_file_sets:
+        return any(all(path.is_file() for path in marker_set) for marker_set in app.installed_file_sets)
     return (app.project_dir / "requirements.txt").is_file() and (
         app.project_dir / "main.py"
     ).is_file()
 
 
+def app_needs_initialization(app: AppConfig) -> bool:
+    if not app.initialization_file_sets or app_installed(app):
+        return False
+    return any(
+        all(path.is_file() for path in marker_set)
+        for marker_set in app.initialization_file_sets
+    )
+
+
+def default_app_settings(app: AppConfig) -> dict:
+    app_settings = {
+        "enabled": False,
+        "times": list(app.default_times),
+        "game_verified": not app.requires_game_verification,
+    }
+    if app.requires_game_verification:
+        app_settings["game_path"] = ""
+        app_settings["game_dir"] = ""
+    elif app.app_id in INSTALL_DIR_MARKERS:
+        app_settings["install_dir"] = ""
+    return app_settings
+
+
+def settings_path_value(value: object) -> Path | None:
+    if not isinstance(value, str):
+        return None
+    value = os.path.expandvars(value.strip())
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+def canonical_path_text(path: Path) -> str:
+    return str(path.resolve(strict=False))
+
+
+def install_dir_has_markers(app: AppConfig, install_dir: Path, markers: dict[str, tuple[str, ...]]) -> bool:
+    names = markers.get(app.app_id)
+    if not names:
+        return False
+    return all((install_dir / name).is_file() for name in names)
+
+
+def install_dir_ready(app: AppConfig, install_dir: Path) -> bool:
+    return install_dir_has_markers(app, install_dir, INSTALL_DIR_MARKERS)
+
+
+def install_dir_needs_initialization(app: AppConfig, install_dir: Path) -> bool:
+    return (
+        install_dir_has_markers(app, install_dir, INITIALIZATION_DIR_MARKERS)
+        and not install_dir_ready(app, install_dir)
+    )
+
+
+def detected_install_dir(app: AppConfig, allow_initialization: bool = False) -> Path | None:
+    for marker_set in app.installed_file_sets:
+        if all(path.is_file() for path in marker_set):
+            return marker_set[0].parent
+    if allow_initialization:
+        for marker_set in app.initialization_file_sets:
+            if all(path.is_file() for path in marker_set):
+                return marker_set[0].parent
+    return None
+
+
+def read_json_object(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def write_json_object(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def saved_game_path_from_project(app: AppConfig) -> Path | None:
+    config = read_json_object(app.project_dir / "configs" / "devices.json")
+    path = settings_path_value(config.get("pc_full_path"))
+    if path and path.is_file():
+        return path
+    return None
+
+
+def derive_nte_launcher_path(game_path: Path) -> Path | None:
+    full_path = canonical_path_text(game_path)
+    marker = "\\Client\\"
+    index = full_path.lower().find(marker.lower())
+    if index < 0:
+        return None
+    install_root = Path(full_path[:index])
+    candidate = install_root / "NTELauncher" / "NTEGame.exe"
+    if candidate.is_file():
+        return candidate
+    return None
+
+
+def sync_game_path_config(app: AppConfig, game_path: Path) -> None:
+    if not app.project_dir.is_dir():
+        return
+
+    process_name = GAME_PROCESS_NAMES.get(app.app_id)
+    if not process_name:
+        return
+
+    config_path = app.project_dir / "configs" / "devices.json"
+    config = read_json_object(config_path)
+    config.update(
+        {
+            "preferred": "pc",
+            "pc_full_path": canonical_path_text(game_path),
+            "capture": "windows",
+            "selected_exe": process_name,
+            "selected_hwnd": 0,
+        }
+    )
+    config.setdefault("interaction", "")
+    write_json_object(config_path, config)
+
+    if app.app_id != "nte":
+        return
+
+    launcher_path = derive_nte_launcher_path(game_path)
+    if not launcher_path:
+        return
+    launcher_config_path = app.project_dir / "configs" / "LauncherTask.json"
+    launcher_config = read_json_object(launcher_config_path)
+    launcher_config["Launcher Path"] = canonical_path_text(launcher_path)
+    write_json_object(launcher_config_path, launcher_config)
+
+
 class Settings:
     def __init__(self, path: Path):
         self.path = path
+        self.loaded_from_legacy = False
         self.data = self._load()
+        self.refresh_paths(save=False)
 
     def _load(self) -> dict:
         defaults = {
             "settings_version": SETTINGS_VERSION,
-            "apps": {
-                app.app_id: {
-                    "enabled": False,
-                    "times": list(app.default_times),
-                    "game_verified": not app.requires_game_verification,
-                }
-                for app in APPS
-            },
+            "apps": {app.app_id: default_app_settings(app) for app in APPS},
             "last_runs": {},
             "log_archives": {},
         }
-        if not self.path.exists():
+
+        source_path = self.path
+        if not source_path.exists() and LEGACY_SETTINGS_PATH.exists():
+            source_path = LEGACY_SETTINGS_PATH
+            self.loaded_from_legacy = True
+        if not source_path.exists():
             return defaults
 
         try:
-            loaded = json.loads(self.path.read_text(encoding="utf-8"))
+            loaded = json.loads(source_path.read_text(encoding="utf-8"))
         except Exception:
             return defaults
+        if not isinstance(loaded, dict):
+            return defaults
 
+        loaded.setdefault("apps", {})
+        if not isinstance(loaded["apps"], dict):
+            loaded["apps"] = {}
         for app in APPS:
-            loaded.setdefault("apps", {})
-            loaded["apps"].setdefault(
-                app.app_id,
-                {
-                    "enabled": False,
-                    "times": list(app.default_times),
-                    "game_verified": not app.requires_game_verification,
-                },
-            )
-            loaded["apps"][app.app_id].setdefault(
-                "game_verified",
-                not app.requires_game_verification,
-            )
+            if not isinstance(loaded["apps"].get(app.app_id), dict):
+                loaded["apps"][app.app_id] = {}
+            app_settings = loaded["apps"][app.app_id]
+            for key, value in default_app_settings(app).items():
+                app_settings.setdefault(key, value)
             if loaded.get("settings_version") != SETTINGS_VERSION:
-                app_settings = loaded["apps"][app.app_id]
                 if (
                     app_settings.get("enabled") is True
                     and app_settings.get("times") == LEGACY_DEFAULT_TIMES.get(app.app_id)
@@ -231,11 +400,83 @@ class Settings:
         loaded.setdefault("log_archives", {})
         return loaded
 
+    def reload(self) -> None:
+        self.loaded_from_legacy = False
+        self.data = self._load()
+        self.refresh_paths(save=False)
+
     def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
-            json.dumps(self.data, ensure_ascii=False, indent=2),
+            json.dumps(self.data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    def refresh_paths(self, save: bool = True) -> None:
+        changed = False
+        for app in APPS:
+            app_settings = self.data["apps"].setdefault(app.app_id, default_app_settings(app))
+            if app.app_id in INSTALL_DIR_MARKERS:
+                changed = self._refresh_install_dir(app, app_settings) or changed
+            if app.requires_game_verification:
+                changed = self._refresh_game_path(app, app_settings) or changed
+        if changed and save:
+            self.save()
+
+    def _refresh_install_dir(self, app: AppConfig, app_settings: dict) -> bool:
+        configured = settings_path_value(app_settings.get("install_dir"))
+        if configured and (
+            install_dir_ready(app, configured)
+            or install_dir_needs_initialization(app, configured)
+        ):
+            return self._set_if_changed(app_settings, "install_dir", canonical_path_text(configured))
+
+        detected = detected_install_dir(app, allow_initialization=True)
+        if detected:
+            return self._set_if_changed(app_settings, "install_dir", canonical_path_text(detected))
+        return False
+
+    def _refresh_game_path(self, app: AppConfig, app_settings: dict) -> bool:
+        changed = False
+        game_path = settings_path_value(app_settings.get("game_path"))
+        if not (game_path and game_path.is_file()):
+            game_path = saved_game_path_from_project(app)
+
+        if game_path and game_path.is_file():
+            changed = self._set_if_changed(app_settings, "game_path", canonical_path_text(game_path)) or changed
+            changed = self._set_if_changed(app_settings, "game_dir", canonical_path_text(game_path.parent)) or changed
+            changed = self._set_if_changed(app_settings, "game_verified", True) or changed
+            sync_game_path_config(app, game_path)
+            return changed
+
+        if app_settings.get("game_verified"):
+            app_settings["game_verified"] = False
+            app_settings.pop("game_verified_at", None)
+            changed = True
+        return changed
+
+    def _set_if_changed(self, data: dict, key: str, value: object) -> bool:
+        if data.get(key) == value:
+            return False
+        data[key] = value
+        return True
+
+    def configured_install_dir(self, app: AppConfig) -> Path | None:
+        if app.app_id not in INSTALL_DIR_MARKERS:
+            return None
+        return settings_path_value(self.data["apps"][app.app_id].get("install_dir"))
+
+    def app_installed(self, app: AppConfig) -> bool:
+        install_dir = self.configured_install_dir(app)
+        if install_dir and install_dir_ready(app, install_dir):
+            return True
+        return app_installed(app)
+
+    def app_needs_initialization(self, app: AppConfig) -> bool:
+        install_dir = self.configured_install_dir(app)
+        if install_dir and install_dir_needs_initialization(app, install_dir):
+            return True
+        return app_needs_initialization(app)
 
     def app_enabled(self, app: AppConfig) -> bool:
         return bool(self.data["apps"][app.app_id].get("enabled", False))
@@ -244,6 +485,10 @@ class Settings:
         times = self.data["apps"][app.app_id].get("times")
         if times is None:
             times = app.default_times
+        if isinstance(times, str):
+            return [times]
+        if not isinstance(times, (list, tuple)):
+            return list(app.default_times)
         return list(times)
 
     def update_app(self, app: AppConfig, enabled: bool, times: list[str]) -> None:
@@ -566,7 +811,7 @@ class TaskRow:
         self.refresh()
 
     def start(self, reason: str = "manual") -> None:
-        if not app_installed(self.app):
+        if not self.settings.app_installed(self.app):
             self.install()
             return
         if (
@@ -606,11 +851,17 @@ class TaskRow:
             self.schedule_button.grid_remove()
             self.verify_button.grid_remove()
             self.install_button.grid()
+            self.install_button.configure(text="安装")
             self.install_button.configure(state="disabled")
             return
 
-        if not app_installed(self.app):
-            self.status_var.set("未安装 | 点击安装下载并准备运行环境")
+        if not self.settings.app_installed(self.app):
+            if self.settings.app_needs_initialization(self.app):
+                self.status_var.set("已检测到本地程序 | 点击初始化下载缺失组件")
+                self.install_button.configure(text="初始化")
+            else:
+                self.status_var.set("未安装 | 点击安装下载并准备运行环境")
+                self.install_button.configure(text="安装")
             self.start_button.grid_remove()
             self.stop_button.grid_remove()
             self.schedule_button.grid_remove()
@@ -622,6 +873,7 @@ class TaskRow:
             return
 
         self.install_button.grid_remove()
+        self.install_button.configure(text="安装")
         if (
             self.app.requires_game_verification
             and not self.settings.game_verified(self.app)
@@ -825,7 +1077,7 @@ class DailyGui:
             return True
         if self.settings.game_verified(app) and not force_prompt:
             return True
-        if not app_installed(app):
+        if not self.settings.app_installed(app):
             return False
 
         if not messagebox.askokcancel(
@@ -878,6 +1130,7 @@ class DailyGui:
                 self.log(app.app_id, line)
 
         if result.returncode == 0:
+            self.settings.reload()
             self.settings.mark_game_verified(app)
             self.refresh_rows()
             messagebox.showinfo(
@@ -910,6 +1163,7 @@ class DailyGui:
                 continue
 
             if message.startswith("__INSTALL_EXIT__:"):
+                self.settings.refresh_paths()
                 self.refresh_rows()
                 exit_code_text = message.split(":", 1)[1]
                 try:
@@ -920,7 +1174,7 @@ class DailyGui:
                 if (
                     exit_code == 0
                     and app is not None
-                    and app_installed(app)
+                    and self.settings.app_installed(app)
                     and app.requires_game_verification
                     and not self.settings.game_verified(app)
                 ):
@@ -947,7 +1201,7 @@ class DailyGui:
         today = now.strftime("%Y-%m-%d")
         self.check_log_archive(now)
         for app in APPS:
-            if not app_installed(app):
+            if not self.settings.app_installed(app):
                 continue
             if app.requires_game_verification and not self.settings.game_verified(app):
                 continue
@@ -1114,22 +1368,30 @@ def archive_logs_for_date(target_date: date, displayed_logs: str | None = None) 
 
 
 def check_config() -> int:
+    settings = Settings(SETTINGS_PATH)
     print(f"Python: {os.sys.executable}")
     print(f"Project root: {ROOT}")
     print(f"Settings: {SETTINGS_PATH}")
+    if settings.loaded_from_legacy:
+        print(f"Legacy settings source: {LEGACY_SETTINGS_PATH}")
     print(f"Log directory: {LOG_DIR}")
     print(f"Log archive directory: {LOG_ARCHIVE_DIR}")
     for app in APPS:
         markers = (
-            ",".join(str(path.exists()).lower() for path in app.installed_files)
-            if app.installed_files
+            ";".join(
+                ",".join(str(path.exists()).lower() for path in marker_set)
+                for marker_set in app.installed_file_sets
+            )
+            if app.installed_file_sets
             else "default"
         )
+        app_settings = settings.data["apps"].get(app.app_id, {})
+        saved_path = app_settings.get("install_dir") or app_settings.get("game_path") or ""
         print(
             f"{app.app_id}: script={app.script.exists()} "
-            f"project={app_installed(app)} "
+            f"project={settings.app_installed(app)} "
             f"workdir={app.workdir.exists()} icon={app.icon and app.icon.exists()} "
-            f"verify={app.requires_game_verification} markers={markers}"
+            f"verify={app.requires_game_verification} saved_path={saved_path} markers={markers}"
         )
     return 0
 
