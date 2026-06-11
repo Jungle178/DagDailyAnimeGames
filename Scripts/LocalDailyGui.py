@@ -41,6 +41,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT / "src"
 SCRIPTS = ROOT / "Scripts"
+ICONS_DIR = ROOT / "icons"
+APP_ICON = ICONS_DIR / "icon.jpg"
 LOG_DIR = ROOT / "Logs" / "LocalDailyGui"
 LOG_ARCHIVE_DIR = ROOT / "Logs"
 SETTINGS_PATH = ROOT / "Setting.json"
@@ -83,7 +85,7 @@ APPS: tuple[AppConfig, ...] = (
         project_dir=ROOT / "Apps" / "MAA",
         script=SCRIPTS / "Run-MAA-Daily.ps1",
         workdir=ROOT,
-        icon=None,
+        icon=APP_ICON,
         default_times=("00:00", "19:00"),
         installed_file_sets=(
             (
@@ -122,7 +124,7 @@ APPS: tuple[AppConfig, ...] = (
         project_dir=ROOT / "Apps" / "BetterGI",
         script=SCRIPTS / "Start-BetterGI-OneDragon.ps1",
         workdir=ROOT,
-        icon=None,
+        icon=APP_ICON,
         default_times=("04:30",),
         installed_file_sets=(
             (SRC_DIR / "BetterGI" / "BetterGI.exe",),
@@ -138,7 +140,7 @@ APPS: tuple[AppConfig, ...] = (
         project_dir=SRC_DIR / "ok-wuthering-waves",
         script=SCRIPTS / "Run-OkWutheringWavesDaily.ps1",
         workdir=ROOT,
-        icon=SRC_DIR / "ok-wuthering-waves" / "icons" / "icon.png",
+        icon=APP_ICON,
         default_times=(),
     ),
     AppConfig(
@@ -147,7 +149,7 @@ APPS: tuple[AppConfig, ...] = (
         project_dir=SRC_DIR / "ok-end-field",
         script=SCRIPTS / "Run-OkEndFieldDaily.ps1",
         workdir=ROOT,
-        icon=SRC_DIR / "ok-end-field" / "icons" / "icon.png",
+        icon=APP_ICON,
         default_times=(),
     ),
     AppConfig(
@@ -156,7 +158,7 @@ APPS: tuple[AppConfig, ...] = (
         project_dir=SRC_DIR / "ok-nte",
         script=SCRIPTS / "Run-OkNteDaily.ps1",
         workdir=ROOT,
-        icon=SRC_DIR / "ok-nte" / "icons" / "icon.png",
+        icon=APP_ICON,
         default_times=(),
     ),
 )
@@ -839,6 +841,10 @@ class TaskRow:
         if self.installer.start():
             self.refresh()
 
+    def set_install_progress(self, message: str) -> None:
+        if self.installer.running:
+            self.status_var.set(f"安装中 | {message}")
+
     def verify_game(self) -> None:
         self.scheduler.ensure_game_verified(self.app, force_prompt=True)
         self.refresh()
@@ -968,6 +974,7 @@ class DailyGui:
         self.runners = {app.app_id: AppRunner(app, self.log_queue) for app in APPS}
         self.rows: dict[str, TaskRow] = {}
         self.images: list[ImageTk.PhotoImage] = []
+        self.window_icon: ImageTk.PhotoImage | None = None
         self.pending_scheduled: list[AppConfig] = []
 
         self.root = Tk()
@@ -975,6 +982,9 @@ class DailyGui:
         self.root.geometry("1080x640")
         self.root.minsize(980, 560)
         self.root.configure(bg="#f7f7f4")
+        self.window_icon = load_window_icon()
+        if self.window_icon is not None:
+            self.root.iconphoto(True, self.window_icon)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._setup_style()
         self._build_layout()
@@ -1189,6 +1199,10 @@ class DailyGui:
                 continue
 
             app_name = next((app.name for app in APPS if app.app_id == app_id), app_id)
+            if message.startswith(("Download progress:", "Download completed:")):
+                row = self.rows.get(app_id)
+                if row is not None:
+                    row.set_install_progress(message)
             self.log_text.configure(state="normal")
             self.log_text.insert(END, f"[{now_text()}] [{app_name}] {message}\n")
             self.log_text.see(END)
@@ -1330,6 +1344,16 @@ def load_icon(app: AppConfig, size: int) -> ImageTk.PhotoImage:
     canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     canvas.alpha_composite(image, ((size - image.width) // 2, (size - image.height) // 2))
     return ImageTk.PhotoImage(canvas)
+
+
+def load_window_icon() -> ImageTk.PhotoImage | None:
+    try:
+        image = Image.open(APP_ICON).convert("RGBA")
+    except Exception:
+        return None
+
+    image.thumbnail((64, 64), Image.LANCZOS)
+    return ImageTk.PhotoImage(image)
 
 
 def archive_logs_for_date(target_date: date, displayed_logs: str | None = None) -> tuple[Path, int]:

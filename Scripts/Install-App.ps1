@@ -214,10 +214,26 @@ function Select-ReleaseAsset {
     throw "No $Description asset matched patterns: $($Patterns -join ', '). Available assets: $available"
 }
 
-function Save-ReleaseAsset {
+function Format-FileSize {
+    param([long]$Bytes)
+
+    if ($Bytes -ge 1GB) {
+        return "{0:N1} GB" -f ($Bytes / 1GB)
+    }
+    if ($Bytes -ge 1MB) {
+        return "{0:N1} MB" -f ($Bytes / 1MB)
+    }
+    if ($Bytes -ge 1KB) {
+        return "{0:N1} KB" -f ($Bytes / 1KB)
+    }
+    return "$Bytes B"
+}
+
+function Save-UrlWithProgress {
     param(
-        [object]$Asset,
-        [string]$Destination
+        [string]$Uri,
+        [string]$Destination,
+        [string]$Description
     )
 
     $directory = Split-Path -Parent $Destination
@@ -225,11 +241,86 @@ function Save-ReleaseAsset {
         New-Item -ItemType Directory -Path $directory | Out-Null
     }
 
-    Write-Host "Downloading $($Asset.name)..."
-    Invoke-WebRequest `
+    Write-Host "Downloading $Description..."
+
+    $request = [System.Net.HttpWebRequest]::Create($Uri)
+    $request.UserAgent = "DagDailyAnimeGames-Installer"
+    $request.AllowAutoRedirect = $true
+    $request.Timeout = 300000
+    $request.ReadWriteTimeout = 300000
+
+    $response = $null
+    $responseStream = $null
+    $fileStream = $null
+    try {
+        $response = $request.GetResponse()
+        $totalBytes = [long]$response.ContentLength
+        $responseStream = $response.GetResponseStream()
+        $fileStream = [System.IO.File]::Open(
+            $Destination,
+            [System.IO.FileMode]::Create,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+
+        $buffer = New-Object byte[] 1048576
+        $downloadedBytes = [long]0
+        $lastPercent = 0
+        $lastReport = Get-Date
+
+        if ($totalBytes -gt 0) {
+            Write-Host "Download progress: 0% (0 B / $(Format-FileSize $totalBytes))"
+        }
+
+        while (($read = $responseStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $fileStream.Write($buffer, 0, $read)
+            $downloadedBytes += $read
+
+            if ($totalBytes -gt 0) {
+                $percent = [int][Math]::Floor(($downloadedBytes * 100.0) / $totalBytes)
+                $percent = [Math]::Min($percent, 100)
+                if ($percent -ge ($lastPercent + 5) -or $percent -eq 100) {
+                    Write-Host "Download progress: $percent% ($(Format-FileSize $downloadedBytes) / $(Format-FileSize $totalBytes))"
+                    $lastPercent = $percent
+                    $lastReport = Get-Date
+                }
+            }
+            elseif (((Get-Date) - $lastReport).TotalSeconds -ge 2) {
+                Write-Host "Download progress: $(Format-FileSize $downloadedBytes)"
+                $lastReport = Get-Date
+            }
+        }
+
+        if ($totalBytes -le 0) {
+            Write-Host "Download progress: $(Format-FileSize $downloadedBytes)"
+        }
+        Write-Host "Download completed: $Description ($(Format-FileSize $downloadedBytes))"
+    }
+    finally {
+        if ($null -ne $fileStream) {
+            $fileStream.Dispose()
+        }
+        if ($null -ne $responseStream) {
+            $responseStream.Dispose()
+        }
+        if ($null -ne $response) {
+            $response.Dispose()
+        }
+    }
+
+    Require-File $Destination
+}
+
+function Save-ReleaseAsset {
+    param(
+        [object]$Asset,
+        [string]$Destination
+    )
+
+    Save-UrlWithProgress `
         -Uri $Asset.browser_download_url `
-        -OutFile $Destination `
-        -Headers @{ "User-Agent" = "DagDailyAnimeGames-Installer" }
+        -Destination $Destination `
+        -Description $Asset.name
 }
 
 function Expand-ZipAsset {
@@ -264,11 +355,10 @@ function Get-SevenZipExtractor {
     }
 
     $uri = "https://www.7-zip.org/a/7zr.exe"
-    Write-Host "Downloading local 7-Zip extractor: $uri"
-    Invoke-WebRequest `
+    Save-UrlWithProgress `
         -Uri $uri `
-        -OutFile $sevenZipReduced `
-        -Headers @{ "User-Agent" = "DagDailyAnimeGames-Installer" }
+        -Destination $sevenZipReduced `
+        -Description "local 7-Zip extractor"
 
     Require-File $sevenZipReduced
     return $sevenZipReduced
