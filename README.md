@@ -83,7 +83,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Scripts\Setup-OkSharedVenv
 - `Run.bat`：自动准备 GUI 环境并启动 GUI。
 - `Update.bat`：更新根仓库和已下载的 submodule。
 - `Setting.json`：本机定时配置、已确认的 PC 游戏路径，以及 MAA/BetterGI 本地目录；不提交到 Git。
-- `icons/icon.jpg`：GUI 窗口和任务行的本地图标，安装项目之前也可显示。
+- `icons/icon.png`：GUI 窗口图标；`icons/<app>.png` 是各任务行的本地图标，安装项目之前也可显示。
 - `Scripts/Setup.bat`：手动创建或更新 GUI 运行环境的隐藏入口。
 - `Scripts/LocalDailyGui.py`：Tkinter GUI 调度器。
 - `Scripts/Install-App.ps1`：按单个项目安装；`ok-*` 下载 submodule 并安装依赖，MAA/BetterGI 下载官方 release 包。

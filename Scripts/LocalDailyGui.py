@@ -42,7 +42,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT / "src"
 SCRIPTS = ROOT / "Scripts"
 ICONS_DIR = ROOT / "icons"
-APP_ICON = ICONS_DIR / "icon.jpg"
+APP_ICON = ICONS_DIR / "icon.png"
+MAA_ICON = ICONS_DIR / "maa.png"
+BETTERGI_ICON = ICONS_DIR / "bettergi.png"
+WUTHERING_ICON = ICONS_DIR / "ok-wuthering-waves.png"
+ENDFIELD_ICON = ICONS_DIR / "ok-end-field.png"
+NTE_ICON = ICONS_DIR / "ok-nte.png"
 LOG_DIR = ROOT / "Logs" / "LocalDailyGui"
 LOG_ARCHIVE_DIR = ROOT / "Logs"
 SETTINGS_PATH = ROOT / "Setting.json"
@@ -85,7 +90,7 @@ APPS: tuple[AppConfig, ...] = (
         project_dir=ROOT / "Apps" / "MAA",
         script=SCRIPTS / "Run-MAA-Daily.ps1",
         workdir=ROOT,
-        icon=APP_ICON,
+        icon=MAA_ICON,
         default_times=("00:00", "19:00"),
         installed_file_sets=(
             (
@@ -124,7 +129,7 @@ APPS: tuple[AppConfig, ...] = (
         project_dir=ROOT / "Apps" / "BetterGI",
         script=SCRIPTS / "Start-BetterGI-OneDragon.ps1",
         workdir=ROOT,
-        icon=APP_ICON,
+        icon=BETTERGI_ICON,
         default_times=("04:30",),
         installed_file_sets=(
             (SRC_DIR / "BetterGI" / "BetterGI.exe",),
@@ -140,7 +145,7 @@ APPS: tuple[AppConfig, ...] = (
         project_dir=SRC_DIR / "ok-wuthering-waves",
         script=SCRIPTS / "Run-OkWutheringWavesDaily.ps1",
         workdir=ROOT,
-        icon=APP_ICON,
+        icon=WUTHERING_ICON,
         default_times=(),
     ),
     AppConfig(
@@ -149,7 +154,7 @@ APPS: tuple[AppConfig, ...] = (
         project_dir=SRC_DIR / "ok-end-field",
         script=SCRIPTS / "Run-OkEndFieldDaily.ps1",
         workdir=ROOT,
-        icon=APP_ICON,
+        icon=ENDFIELD_ICON,
         default_times=(),
     ),
     AppConfig(
@@ -158,7 +163,7 @@ APPS: tuple[AppConfig, ...] = (
         project_dir=SRC_DIR / "ok-nte",
         script=SCRIPTS / "Run-OkNteDaily.ps1",
         workdir=ROOT,
-        icon=APP_ICON,
+        icon=NTE_ICON,
         default_times=(),
     ),
 )
@@ -334,7 +339,6 @@ def sync_game_path_config(app: AppConfig, game_path: Path) -> None:
             "pc_full_path": canonical_path_text(game_path),
             "capture": "windows",
             "selected_exe": process_name,
-            "selected_hwnd": 0,
         }
     )
     config.setdefault("interaction", "")
