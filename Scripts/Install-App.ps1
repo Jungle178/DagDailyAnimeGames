@@ -787,6 +787,14 @@ if (-not $Root) {
 $Root = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Root)
 Use-GitRuntimePath
 
+function Require-Git {
+    $gitCmd = Get-Command "git.exe" -ErrorAction SilentlyContinue
+    if (-not $gitCmd) {
+        throw "Git was not found. Please install Git for Windows (https://git-scm.com/download/win) and try again."
+    }
+    Write-Host "Found git: $($gitCmd.Source)"
+}
+
 if ($AppId -eq "maa") {
     $maaDir = Resolve-FirstDirectoryWithFile `
         -Root $Root `
@@ -862,6 +870,7 @@ if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
 }
 
 Write-Host "Installing $($App.Name)..."
+Require-Git
 Invoke-Checked -FilePath "git" -Arguments @("-c", "core.longpaths=true", "submodule", "update", "--init", "--recursive", "--", $App.Path) -WorkingDirectory $Root
 
 Require-File $RequirementsPath

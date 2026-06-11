@@ -141,6 +141,58 @@ function Resolve-MaaCliPath {
     Resolve-CommandPath "maa-cli.exe"
 }
 
+function Get-SettingMumuDir {
+    param(
+        [string]$RootPath,
+        [string]$AppId
+    )
+
+    $settingsPath = Join-Path $RootPath "Setting.json"
+    if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+        return ""
+    }
+
+    try {
+        $settings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        return ""
+    }
+
+    $apps = Get-JsonPropertyValue -Object $settings -Name "apps"
+    $appSettings = Get-JsonPropertyValue -Object $apps -Name $AppId
+    if ($appSettings -and $appSettings.mumu_verified -eq $true) {
+        return [string]$appSettings.mumu_dir
+    }
+    return ""
+}
+
+function Get-SettingMumuCli {
+    param(
+        [string]$RootPath,
+        [string]$AppId
+    )
+
+    $settingsPath = Join-Path $RootPath "Setting.json"
+    if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+        return ""
+    }
+
+    try {
+        $settings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        return ""
+    }
+
+    $apps = Get-JsonPropertyValue -Object $settings -Name "apps"
+    $appSettings = Get-JsonPropertyValue -Object $apps -Name $AppId
+    if ($appSettings -and $appSettings.mumu_verified -eq $true) {
+        return [string]$appSettings.mumu_cli
+    }
+    return ""
+}
+
 function Resolve-MuMuCliPath {
     param([string]$ExplicitPath)
 
@@ -148,9 +200,7 @@ function Resolve-MuMuCliPath {
     $programFilesX86 = Get-EnvValue "ProgramFiles(x86)"
     $candidates = @(
         $ExplicitPath,
-        (Get-EnvValue "MAA_MUMU_CLI"),
-        "E:\Program Files\Netease\MuMu Player 12\nx_main\mumu-cli.exe",
-        "C:\Program Files\Netease\MuMu Player 12\nx_main\mumu-cli.exe"
+        (Get-EnvValue "MAA_MUMU_CLI")
     )
     if ($programFiles) {
         $candidates += (Join-Path $programFiles "Netease\MuMu Player 12\nx_main\mumu-cli.exe")
@@ -225,7 +275,7 @@ function Wait-MuMuAndroid {
             if ($info.launch_err_code -and $info.launch_err_code -ne 0) {
                 throw "MuMu launch failed: $($info.launch_err_msg)"
             }
-            if ($info.is_android_started -eq $true) {
+            if ($info.is_android_started -eq $true -or $info.player_state -eq "start_finished") {
                 return
             }
         }
@@ -268,6 +318,10 @@ function Invoke-MaaCli {
 $MaaDir = Resolve-MaaInstallDir -ExplicitDir $MaaDir -RootPath $Root
 
 $MaaCli = Resolve-MaaCliPath -ExplicitPath $MaaCli -InstallDir $MaaDir
+$settingMumuCli = Get-SettingMumuCli -RootPath $Root -AppId "maa"
+if (-not $MumuCli -and $settingMumuCli) {
+    $MumuCli = $settingMumuCli
+}
 $MumuCli = Resolve-MuMuCliPath -ExplicitPath $MumuCli
 $Adb = Resolve-AdbPath -ExplicitPath $Adb -MumuCliPath $MumuCli
 

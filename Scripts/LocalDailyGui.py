@@ -76,6 +76,7 @@ class AppConfig:
     installed_file_sets: tuple[tuple[Path, ...], ...] = ()
     initialization_file_sets: tuple[tuple[Path, ...], ...] = ()
     requires_game_verification: bool = True
+    requires_emulator_verification: bool = False
     cleanup_commands: tuple[tuple[str, ...], ...] = ()
 
 
@@ -111,6 +112,7 @@ APPS: tuple[AppConfig, ...] = (
         workdir=ROOT,
         icon=MAA_ICON,
         default_times=(),
+        requires_emulator_verification=True,
         installed_file_sets=(
             (
                 SRC_DIR / "MAA" / "MAA.exe",
@@ -259,6 +261,10 @@ def default_app_settings(app: AppConfig) -> dict:
         app_settings["game_dir"] = ""
     elif app.app_id in INSTALL_DIR_MARKERS:
         app_settings["install_dir"] = ""
+    if app.requires_emulator_verification:
+        app_settings["mumu_dir"] = ""
+        app_settings["mumu_cli"] = ""
+        app_settings["mumu_verified"] = False
     return app_settings
 
 
@@ -539,6 +545,26 @@ class Settings:
         app_settings["game_verified"] = False
         app_settings.pop("game_verified_at", None)
         self.save()
+
+    def mumu_verified(self, app: AppConfig) -> bool:
+        return bool(self.data["apps"][app.app_id].get("mumu_verified", False))
+
+    def mark_mumu_verified(self, app: AppConfig, mumu_dir: str, mumu_cli: str) -> None:
+        app_settings = self.data["apps"].setdefault(app.app_id, {})
+        app_settings["mumu_dir"] = mumu_dir
+        app_settings["mumu_cli"] = mumu_cli
+        app_settings["mumu_verified"] = True
+        self.save()
+
+    def clear_mumu_verified(self, app: AppConfig) -> None:
+        app_settings = self.data["apps"].setdefault(app.app_id, {})
+        app_settings["mumu_verified"] = False
+        self.save()
+
+    def configured_mumu_cli(self, app: AppConfig) -> str:
+        if not app.requires_emulator_verification:
+            return ""
+        return self.data["apps"][app.app_id].get("mumu_cli", "")
 
     def was_run(self, app: AppConfig, date: str, time_value: str) -> bool:
         return self._key(app, date, time_value) in self.data["last_runs"]
@@ -837,7 +863,11 @@ class TaskRow:
         self.stop_button = ttk.Button(actions, text="强制退出", command=self.stop)
         self.schedule_button = ttk.Button(actions, text="定时", command=self.configure_schedule)
         self.install_button = ttk.Button(actions, text="安装", command=self.install)
-        self.verify_button = ttk.Button(actions, text="确认游戏", command=self.verify_game)
+        self.verify_button = ttk.Button(
+            actions,
+            text="确认游戏",
+            command=self.verify_required,
+        )
         self.start_button.grid(row=0, column=0, padx=6, ipadx=18, ipady=10)
         self.stop_button.grid(row=0, column=1, padx=6, ipadx=12, ipady=10)
         self.schedule_button.grid(row=0, column=2, padx=6, ipadx=18, ipady=10)
@@ -858,6 +888,13 @@ class TaskRow:
             and not self.settings.game_verified(self.app)
         ):
             if not self.scheduler.ensure_game_verified(self.app):
+                self.refresh()
+                return
+        if (
+            self.app.requires_emulator_verification
+            and not self.settings.mumu_verified(self.app)
+        ):
+            if not self.scheduler.ensure_emulator_verified(self.app):
                 self.refresh()
                 return
         if reason == "manual" and self.scheduler.any_running(except_app_id=self.app.app_id):
@@ -882,8 +919,17 @@ class TaskRow:
         if self.installer.running:
             self.status_var.set(f"安装中 | {message}")
 
-    def verify_game(self) -> None:
-        self.scheduler.ensure_game_verified(self.app, force_prompt=True)
+    def verify_required(self) -> None:
+        if (
+            self.app.requires_game_verification
+            and not self.settings.game_verified(self.app)
+        ):
+            self.scheduler.ensure_game_verified(self.app, force_prompt=True)
+        elif (
+            self.app.requires_emulator_verification
+            and not self.settings.mumu_verified(self.app)
+        ):
+            self.scheduler.ensure_emulator_verified(self.app, force_prompt=True)
         self.refresh()
 
     def refresh(self) -> None:
@@ -926,6 +972,21 @@ class TaskRow:
             self.stop_button.grid_remove()
             self.schedule_button.grid_remove()
             self.verify_button.grid()
+            self.verify_button.configure(text="确认游戏")
+            self.verify_button.configure(state="normal")
+            return
+
+        self.verify_button.grid_remove()
+        if (
+            self.app.requires_emulator_verification
+            and not self.settings.mumu_verified(self.app)
+        ):
+            self.status_var.set("已安装 | 未确认模拟器位置 | 打开MuMu后点击确认")
+            self.start_button.grid_remove()
+            self.stop_button.grid_remove()
+            self.schedule_button.grid_remove()
+            self.verify_button.grid()
+            self.verify_button.configure(text="确认模拟器")
             self.verify_button.configure(state="normal")
             return
 
@@ -1223,6 +1284,82 @@ class DailyGui:
         )
         return False
 
+    def ensure_emulator_verified(self, app: AppConfig, force_prompt: bool = False) -> bool:
+        if not app.requires_emulator_verification:
+            return True
+        if self.settings.mumu_verified(app) and not force_prompt:
+            return True
+        if not self.settings.app_installed(app):
+            return False
+
+        msg = (
+            "请先打开 MuMu Player 12 模拟器。\n\n"
+            "打开 MuMu 后，点击【确定】开始检测 mumu-cli 位置。\n"
+            "如果还没准备好，可以取消，之后再点【确认模拟器】。"
+        )
+        if not messagebox.askokcancel(
+            "确认模拟器位置",
+            msg,
+            parent=self.root,
+        ):
+            self.log(app.app_id, "已取消模拟器位置确认")
+            return False
+
+        command = [
+            POWERSHELL,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(SCRIPTS / "Verify-MuMu.ps1"),
+        ]
+        self.log(app.app_id, f"确认模拟器位置: {' '.join(command)}")
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+                check=False,
+                creationflags=HIDDEN_PROCESS_FLAGS,
+            )
+        except subprocess.TimeoutExpired:
+            self.log(app.app_id, "确认模拟器位置超时")
+            messagebox.showerror(
+                "确认失败",
+                "没有在限定时间内确认模拟器位置。",
+                parent=self.root,
+            )
+            return False
+
+        output = result.stdout.strip()
+        if output:
+            for line in output.splitlines():
+                self.log(app.app_id, line)
+
+        if result.returncode == 0:
+            self.settings.reload()
+            self.refresh_rows()
+            messagebox.showinfo(
+                "确认完成",
+                "模拟器位置已确认，可以正式运行 MAA-cli。",
+                parent=self.root,
+            )
+            return True
+
+        messagebox.showerror(
+            "确认失败",
+            "没有找到 MuMu 模拟器的运行进程。\n\n"
+            "请确认已经打开 MuMu Player 12 模拟器窗口，然后再试一次。",
+            parent=self.root,
+        )
+        return False
+
     def process_logs(self) -> None:
         while True:
             try:
@@ -1281,6 +1418,8 @@ class DailyGui:
             if not self.settings.app_installed(app):
                 continue
             if app.requires_game_verification and not self.settings.game_verified(app):
+                continue
+            if app.requires_emulator_verification and not self.settings.mumu_verified(app):
                 continue
             if not self.settings.app_enabled(app):
                 continue

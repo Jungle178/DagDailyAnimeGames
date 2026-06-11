@@ -110,6 +110,13 @@ if (-not $Root) {
 }
 $Root = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Root)
 Use-GitRuntimePath
+
+$gitCmd = Get-Command "git.exe" -ErrorAction SilentlyContinue
+if (-not $gitCmd) {
+    throw "Git was not found. Please install Git for Windows (https://git-scm.com/download/win) and try again."
+}
+Write-Host "Found git: $($gitCmd.Source)"
+
 Update-RootRepository -Path $Root
 $Submodules = @(
     @{ Path = "src\ok-end-field"; Branch = "master"; Name = "ok-end-field" },

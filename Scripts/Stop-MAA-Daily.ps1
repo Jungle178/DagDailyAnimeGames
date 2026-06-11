@@ -36,9 +36,7 @@ function Resolve-MuMuCliPath {
     $programFilesX86 = Get-EnvValue "ProgramFiles(x86)"
     $candidates = @(
         $ExplicitPath,
-        (Get-EnvValue "MAA_MUMU_CLI"),
-        "E:\Program Files\Netease\MuMu Player 12\nx_main\mumu-cli.exe",
-        "C:\Program Files\Netease\MuMu Player 12\nx_main\mumu-cli.exe"
+        (Get-EnvValue "MAA_MUMU_CLI")
     )
     if ($programFiles) {
         $candidates += (Join-Path $programFiles "Netease\MuMu Player 12\nx_main\mumu-cli.exe")

@@ -1,4 +1,4 @@
-# DagDailyAnimeGames
+# DAG-DailyAnimeGames二游日常
 
 本项目是一个二游日常任务 GUI 调度器。
 
