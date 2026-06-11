@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("maa", "bettergi", "wuthering", "endfield", "nte")]
+    [ValidateSet("maa", "maa-gui", "bettergi", "wuthering", "endfield", "nte")]
     [string]$AppId,
     [string]$Root = "",
     [switch]$SkipInstall
@@ -438,6 +438,187 @@ function Get-BetterGiCandidateDirectories {
     )
 }
 
+function Convert-MaaGuiToCliConfig {
+    param([string]$MaaDir)
+
+    $cliConfigDir = Join-Path $env:APPDATA "loong\maa\config"
+    $cliTasksDir = Join-Path $cliConfigDir "tasks"
+    $dailyTomlPath = Join-Path $cliTasksDir "daily.toml"
+
+    $writeDefaultDailyToml = {
+        if (-not (Test-Path -LiteralPath $cliTasksDir -PathType Container)) {
+            New-Item -ItemType Directory -Path $cliTasksDir -Force | Out-Null
+        }
+
+        $content = @(
+            '"$schema" = "../schemas/task.schema.json"',
+            'client_type = "Official"',
+            "",
+            "[[tasks]]",
+            'name = "开始唤醒"',
+            'type = "StartUp"',
+            "",
+            "[[tasks]]",
+            'name = "理智作战"',
+            'type = "Fight"',
+            "",
+            "[[tasks]]",
+            'name = "基建换班"',
+            'type = "Infrast"',
+            "",
+            "[[tasks]]",
+            'name = "自动公招"',
+            'type = "Recruit"',
+            "",
+            "[[tasks]]",
+            'name = "信用收支"',
+            'type = "Mall"',
+            "",
+            "[[tasks]]",
+            'name = "领取奖励"',
+            'type = "Award"',
+            ""
+        ) -join [Environment]::NewLine
+
+        [System.IO.File]::WriteAllText(
+            $dailyTomlPath,
+            $content + [Environment]::NewLine,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        Write-Host "Generated default CLI config: $dailyTomlPath"
+    }
+
+    $guiJsonPath = Join-Path $MaaDir "config\gui.json"
+    $guiNewPath = Join-Path $MaaDir "config\gui.new.json"
+
+    if (-not (Test-Path -LiteralPath $guiJsonPath -PathType Leaf)) {
+        Write-Host "GUI config not found; generating default CLI config."
+        & $writeDefaultDailyToml
+        return
+    }
+
+    $guiConfig = Read-JsonObject $guiJsonPath
+    $currentProfile = $guiConfig.Current
+    if (-not $currentProfile) {
+        Write-Host "No current profile in gui.json; generating default CLI config."
+        & $writeDefaultDailyToml
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $guiNewPath -PathType Leaf)) {
+        Write-Host "gui.new.json not found; generating default CLI config."
+        & $writeDefaultDailyToml
+        return
+    }
+
+    $guiNew = Read-JsonObject $guiNewPath
+    $taskQueue = @()
+    if ($guiNew.PSObject.Properties.Name -contains "Configurations") {
+        $configs = $guiNew.Configurations
+        if ($configs -and $configs.PSObject.Properties.Name -contains $currentProfile) {
+            $profile = $configs.$currentProfile
+            if ($profile.PSObject.Properties.Name -contains "TaskQueue") {
+                $taskQueue = @($profile.TaskQueue)
+            }
+        }
+    }
+
+    if ($taskQueue.Count -eq 0) {
+        Write-Host "No tasks found in GUI profile '$currentProfile'; generating default CLI config."
+        & $writeDefaultDailyToml
+        return
+    }
+
+    $typeMap = @{
+        StartUp = "StartUp"
+        Fight   = "Fight"
+        Infrast = "Infrast"
+        Recruit = "Recruit"
+        Mall    = "Mall"
+        Award   = "Award"
+    }
+
+    $lines = @(
+        '"$schema" = "../schemas/task.schema.json"',
+        'client_type = "Official"',
+        ""
+    )
+
+    foreach ($task in $taskQueue) {
+        if (-not $task.IsEnable) { continue }
+
+        $cliType = $typeMap[$task.TaskType]
+        if (-not $cliType) {
+            Write-Host "Skipping unknown task type: $($task.TaskType)"
+            continue
+        }
+
+        $name = $task.Name
+        $lines += "[[tasks]]"
+        $lines += "name = `"$name`""
+        $lines += "type = `"$cliType`""
+
+        switch ($task.TaskType) {
+            "Fight" {
+                if ($task.StagePlan -and $task.StagePlan.Count -gt 0) {
+                    $lines += "stage = `"$($task.StagePlan[0])`""
+                }
+                if ($task.MedicineCount) { $lines += "medicine = $($task.MedicineCount)" }
+                if ($task.StoneCount) { $lines += "stone = $($task.StoneCount)" }
+                if ($task.TimesLimit) { $lines += "times = $($task.TimesLimit)" }
+            }
+            "Infrast" {
+                if ($task.Mode) { $lines += "mode = $($task.Mode)" }
+                if ($task.DormThreshold) {
+                    $threshold = [double]$task.DormThreshold / 100.0
+                    $lines += "threshold = $threshold"
+                }
+            }
+            "Recruit" {
+                if ($task.MaxTimes) { $lines += "times = $($task.MaxTimes)" }
+                if ($task.PreserveTagList) {
+                    $lines += "preserve_tags = `"$($task.PreserveTagList)`""
+                }
+            }
+            "Mall" {
+                if ($task.FirstList -and $task.FirstList -ne "") {
+                    $items = @(($task.FirstList -split ";").Trim() | Where-Object { $_ } | ForEach-Object { "`"$_`"" })
+                    if ($items.Count -gt 0) {
+                        $lines += "buy_first = [$($items -join ", ")]"
+                    }
+                }
+                if ($task.BlackList -and $task.BlackList -ne "") {
+                    $items = @(($task.BlackList -split ";").Trim() | Where-Object { $_ } | ForEach-Object { "`"$_`"" })
+                    if ($items.Count -gt 0) {
+                        $lines += "blacklist = [$($items -join ", ")]"
+                    }
+                }
+            }
+            "Award" {
+                if ($null -ne $task.FreeGacha) {
+                    $lines += "recruit = $($task.FreeGacha.ToString().ToLower())"
+                }
+            }
+        }
+
+        $lines += ""
+        Write-Host "  Converted: $name -> $cliType"
+    }
+
+    if (-not (Test-Path -LiteralPath $cliTasksDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $cliTasksDir -Force | Out-Null
+    }
+
+    $content = ($lines -join [Environment]::NewLine)
+    [System.IO.File]::WriteAllText(
+        $dailyTomlPath,
+        $content + [Environment]::NewLine,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    Write-Host "Converted GUI config to CLI: $dailyTomlPath"
+    Write-Host "  Profile: $currentProfile, Tasks converted: $($taskQueue.Where{ $_.IsEnable }.Count)"
+}
+
 function Install-MaaCli {
     param(
         [string]$Root,
@@ -490,13 +671,16 @@ function Install-MaaRelease {
     if ($existingMaaDir) {
         Write-Host "Detected existing MAA release: $existingMaaDir"
         if (-not (Test-Path -LiteralPath (Join-Path $existingMaaDir "maa-cli.exe") -PathType Leaf)) {
-            Write-Host "maa-cli is missing; initializing existing MAA directory."
+            Write-Host "maa-cli is missing; installing CLI into existing MAA directory."
             Install-MaaCli -Root $Root -MaaDir $existingMaaDir
         }
+        Write-Host "Syncing CLI config from GUI settings..."
+        Convert-MaaGuiToCliConfig -MaaDir $existingMaaDir
         Require-File (Join-Path $existingMaaDir "MAA.exe")
         Require-File (Join-Path $existingMaaDir "maa-cli.exe")
         Write-Host "MAA release is ready: $existingMaaDir"
         Update-InstallDirSetting -Root $Root -AppId "maa" -InstallDir $existingMaaDir
+        Update-InstallDirSetting -Root $Root -AppId "maa-gui" -InstallDir $existingMaaDir
         return
     }
 
@@ -527,12 +711,15 @@ function Install-MaaRelease {
     Write-Host "Installing MAA release to: $installDir"
     Copy-DirectoryContents -Source $maaSourceDir -Destination $installDir -PreserveExistingNames @("config")
 
+    Write-Host "Installing maa-cli and syncing CLI config..."
     Install-MaaCli -Root $Root -MaaDir $installDir
+    Convert-MaaGuiToCliConfig -MaaDir $installDir
 
     Require-File (Join-Path $installDir "MAA.exe")
     Require-File (Join-Path $installDir "maa-cli.exe")
     Write-Host "MAA release is ready: $installDir"
     Update-InstallDirSetting -Root $Root -AppId "maa" -InstallDir $installDir
+    Update-InstallDirSetting -Root $Root -AppId "maa-gui" -InstallDir $installDir
 
     Write-Host "Cleaning up download artifacts: $downloadDir"
     Remove-Item -LiteralPath $downloadDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -613,11 +800,32 @@ if ($AppId -eq "maa") {
         Require-File (Join-Path $maaDir "MAA.exe")
         Require-File (Join-Path $maaDir "maa-cli.exe")
         Update-InstallDirSetting -Root $Root -AppId "maa" -InstallDir $maaDir
+        Update-InstallDirSetting -Root $Root -AppId "maa-gui" -InstallDir $maaDir
     }
     else {
         Install-MaaRelease -Root $Root
     }
     Write-Host "MAA is ready."
+    exit 0
+}
+
+if ($AppId -eq "maa-gui") {
+    $maaDir = Resolve-FirstDirectoryWithFile `
+        -Root $Root `
+        -RelativeDirectories (Get-MaaCandidateDirectories) `
+        -FileName "MAA.exe"
+    if (-not $maaDir) {
+        $maaDir = Join-Path $Root "Apps\MAA"
+    }
+    if ($SkipInstall) {
+        Write-Host "Skipping MAA download; validating existing files."
+        Require-File (Join-Path $maaDir "MAA.exe")
+        Update-InstallDirSetting -Root $Root -AppId "maa-gui" -InstallDir $maaDir
+    }
+    else {
+        Install-MaaRelease -Root $Root
+    }
+    Write-Host "MAA GUI is ready."
     exit 0
 }
 

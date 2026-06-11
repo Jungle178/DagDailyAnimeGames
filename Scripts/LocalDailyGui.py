@@ -1112,6 +1112,7 @@ class DailyGui:
         log_scrollbar.config(command=self.log_text.yview)
 
         self.log("system", "GUI 已启动。定时检查每 10 秒执行一次。")
+        self.log("system", "本项目为本地开源软件，如果你付费购买了本软件赶紧退款！")
 
     def _build_menu(self) -> None:
         menu = Menu(self.root)

@@ -21,3 +21,6 @@ AGENTS.md
 
 .DS_Store
 Thumbs.db
+
+Test/
+*.lnk
