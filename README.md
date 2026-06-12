@@ -14,6 +14,18 @@
 
 `Run.bat` 会检测 `.venv` 是否存在且能加载 GUI 依赖；缺失时会自动创建环境，然后启动 GUI。
 
+## 开机自启动
+
+注册 Windows 登录自启动计划任务：
+
+```powershell
+.\Scripts\Register-StartupTask.ps1
+```
+
+## 无人值守远程调试
+
+长时间无人值守测试时，可以通过 Codex 写入本地命令文件远程控制 GUI。用法见 [无人值守远程调试文档](assets/unattended-remote-debugging.md)。
+
 ## 更新已下载项目
 
 ```powershell

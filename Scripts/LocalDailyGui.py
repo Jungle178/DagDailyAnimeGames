@@ -52,10 +52,18 @@ ENDFIELD_ICON = ICONS_DIR / "ok-end-field.png"
 NTE_ICON = ICONS_DIR / "ok-nte.png"
 LOG_DIR = ROOT / "Logs" / "LocalDailyGui"
 LOG_ARCHIVE_DIR = ROOT / "Logs"
+DEBUG_COMMANDS_PATH = LOG_DIR / "debug_commands.jsonl"
+DEBUG_STATUS_PATH = LOG_DIR / "debug_status.json"
+DEBUG_POLL_MS = 2_000
+DEBUG_STATUS_REFRESH_SECONDS = 10
 SETTINGS_PATH = ROOT / "Setting.json"
 LEGACY_SETTINGS_PATH = SCRIPTS / "LocalDailyGui.settings.json"
 POWERSHELL = "powershell.exe"
 CATCH_UP_MINUTES = 30
+SCHEDULED_RUN_TIMEOUT_MINUTES = 30
+SCHEDULED_RUN_TIMEOUT = timedelta(minutes=SCHEDULED_RUN_TIMEOUT_MINUTES)
+LOG_FILE_STAMP_FORMAT = "%Y%m%d_%H%M%S"
+LOG_FILE_STAMP_LENGTH = 15
 SETTINGS_VERSION = 6
 LEGACY_DEFAULT_TIMES: dict[str, list[str]] = {}
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -217,6 +225,15 @@ def now_text() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
+def log_file_start_time(log_file: Path | None) -> datetime | None:
+    if log_file is None:
+        return None
+    try:
+        return datetime.strptime(log_file.name[:LOG_FILE_STAMP_LENGTH], LOG_FILE_STAMP_FORMAT)
+    except ValueError:
+        return None
+
+
 def validate_times(raw: str) -> list[str]:
     items = [item.strip() for item in re.split(r"[,，\s]+", raw) if item.strip()]
     if not items:
@@ -231,6 +248,35 @@ def validate_times(raw: str) -> list[str]:
             raise ValueError(f"时间超出范围: {item}")
         result.append(f"{hour:02d}:{minute:02d}")
     return sorted(set(result))
+
+
+def debug_bool(value: object, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "y", "on"):
+            return True
+        if normalized in ("0", "false", "no", "n", "off"):
+            return False
+        return default
+    return bool(value)
+
+
+def debug_times(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        if not value.strip():
+            return []
+        return validate_times(value)
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return []
+        return validate_times(",".join(str(item) for item in value))
+    raise ValueError("times 必须是字符串或数组")
 
 
 def app_installed(app: AppConfig) -> bool:
@@ -681,6 +727,9 @@ class AppRunner:
         self.settings = settings
         self.process: subprocess.Popen[str] | None = None
         self.log_file: Path | None = None
+        self.started_at: datetime | None = None
+        self.start_reason: str | None = None
+        self.stop_requested = False
         self.lock = threading.Lock()
 
     @property
@@ -695,8 +744,11 @@ class AppRunner:
                 return False
 
             ensure_dirs()
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            stamp = datetime.now().strftime(LOG_FILE_STAMP_FORMAT)
             self.log_file = LOG_DIR / f"{stamp}_{self.app.app_id}_{reason}.log"
+            self.started_at = datetime.strptime(stamp, LOG_FILE_STAMP_FORMAT)
+            self.start_reason = reason
+            self.stop_requested = False
             command = [
                 POWERSHELL,
                 "-NoProfile",
@@ -733,17 +785,89 @@ class AppRunner:
         threading.Thread(target=self._read_output, daemon=True).start()
         return True
 
-    def stop(self) -> None:
+    def stop(self, reason: str | None = None) -> None:
         with self.lock:
             process = self.process
+            if process is None or process.poll() is not None:
+                no_running = True
+                already_stopping = False
+            elif self.stop_requested:
+                no_running = False
+                already_stopping = True
+            else:
+                no_running = False
+                already_stopping = False
+                self.stop_requested = True
 
-        if process is None or process.poll() is not None:
+        if no_running:
             self.log("没有正在运行的任务")
             self._cleanup()
             return
 
+        if already_stopping:
+            if reason:
+                self.log(f"{reason}，进程树已在退出中")
+            else:
+                self.log("进程树已在退出中")
+            return
+
+        if reason:
+            self.log(reason)
+        assert process is not None
         self.log(f"强制退出进程树 PID={process.pid}")
         threading.Thread(target=self._kill_tree, args=(process.pid,), daemon=True).start()
+
+    def scheduled_timeout_elapsed(self, now: datetime) -> timedelta | None:
+        with self.lock:
+            process = self.process
+            if (
+                process is None
+                or process.poll() is not None
+                or self.start_reason != "scheduled"
+                or self.stop_requested
+            ):
+                return None
+            started_at = log_file_start_time(self.log_file) or self.started_at
+
+        if started_at is None:
+            return None
+
+        elapsed = now - started_at
+        if elapsed < SCHEDULED_RUN_TIMEOUT:
+            return None
+        return elapsed
+
+    def snapshot(self, now: datetime) -> dict:
+        with self.lock:
+            process = self.process
+            running = process is not None and process.poll() is None
+            started_at = log_file_start_time(self.log_file) or self.started_at
+            start_reason = self.start_reason
+            stop_requested = self.stop_requested
+            log_file = self.log_file
+            pid = process.pid if process is not None else None
+
+        elapsed_seconds = None
+        timeout_remaining_seconds = None
+        if running and started_at is not None:
+            elapsed = now - started_at
+            elapsed_seconds = max(0, int(elapsed.total_seconds()))
+            if start_reason == "scheduled":
+                timeout_remaining_seconds = max(
+                    0,
+                    int((SCHEDULED_RUN_TIMEOUT - elapsed).total_seconds()),
+                )
+
+        return {
+            "running": running,
+            "pid": pid,
+            "start_reason": start_reason,
+            "started_at": started_at.isoformat(timespec="seconds") if started_at else None,
+            "elapsed_seconds": elapsed_seconds,
+            "scheduled_timeout_remaining_seconds": timeout_remaining_seconds,
+            "stop_requested": stop_requested,
+            "log_file": str(log_file) if log_file is not None else None,
+        }
 
     def log(self, message: str) -> None:
         self.log_queue.put((self.app.app_id, message))
@@ -768,6 +892,9 @@ class AppRunner:
         with self.lock:
             if self.process is process:
                 self.process = None
+                self.started_at = None
+                self.start_reason = None
+                self.stop_requested = False
         self.log_queue.put((self.app.app_id, "__STATUS__"))
 
     def _kill_tree(self, pid: int) -> None:
@@ -1074,6 +1201,8 @@ class DailyGui:
         self.images: list[ImageTk.PhotoImage] = []
         self.window_icon: ImageTk.PhotoImage | None = None
         self.pending_scheduled: list[AppConfig] = []
+        self.debug_command_position = self._initial_debug_command_position()
+        self.debug_status_written_at: datetime | None = None
 
         self.root = Tk()
         self.root.title("DAG二游日常")
@@ -1172,7 +1301,12 @@ class DailyGui:
         self.log_text.pack(side=LEFT, fill=BOTH, expand=True)
         log_scrollbar.config(command=self.log_text.yview)
 
-        self.log("system", "GUI 已启动。定时检查每 10 秒执行一次。")
+        self.log(
+            "system",
+            f"GUI 已启动。定时检查每 10 秒执行一次，定时任务超过 {SCHEDULED_RUN_TIMEOUT_MINUTES} 分钟会自动强制退出。",
+        )
+        self.log("system", f"远程调试命令文件: {DEBUG_COMMANDS_PATH}")
+        self.log("system", f"远程调试状态文件: {DEBUG_STATUS_PATH}")
         self.log("system", "本项目为本地开源软件，如果你付费购买了本软件赶紧退款！")
 
     def _build_menu(self) -> None:
@@ -1198,6 +1332,8 @@ class DailyGui:
     def run(self) -> None:
         self.root.after(250, self.process_logs)
         self.root.after(1000, self.check_schedule)
+        self.root.after(1000, self.poll_debug_commands)
+        self.write_debug_status("startup", force=True)
         self.root.mainloop()
 
     def log(self, app_id: str, message: str) -> None:
@@ -1205,6 +1341,208 @@ class DailyGui:
 
     def app_by_id(self, app_id: str) -> AppConfig | None:
         return next((app for app in APPS if app.app_id == app_id), None)
+
+    def _initial_debug_command_position(self) -> int:
+        try:
+            return DEBUG_COMMANDS_PATH.stat().st_size
+        except OSError:
+            return 0
+
+    def poll_debug_commands(self) -> None:
+        try:
+            for command in self.read_debug_commands():
+                self.handle_debug_command(command)
+            self.write_debug_status("heartbeat")
+        except Exception as exc:
+            self.log("system", f"远程调试轮询失败: {exc}")
+            try:
+                self.write_debug_status("poll_error", force=True)
+            except Exception:
+                pass
+        self.root.after(DEBUG_POLL_MS, self.poll_debug_commands)
+
+    def read_debug_commands(self) -> list[dict]:
+        if not DEBUG_COMMANDS_PATH.exists():
+            return []
+
+        try:
+            current_size = DEBUG_COMMANDS_PATH.stat().st_size
+            if current_size < self.debug_command_position:
+                self.debug_command_position = 0
+
+            with DEBUG_COMMANDS_PATH.open("r", encoding="utf-8") as handle:
+                handle.seek(self.debug_command_position)
+                lines = handle.readlines()
+                self.debug_command_position = handle.tell()
+        except OSError as exc:
+            self.log("system", f"读取远程调试命令失败: {exc}")
+            return []
+
+        commands: list[dict] = []
+        for line in lines:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                command = json.loads(text)
+            except json.JSONDecodeError as exc:
+                self.log("system", f"远程调试命令 JSON 错误: {exc}: {text[:120]}")
+                continue
+            if not isinstance(command, dict):
+                self.log("system", f"远程调试命令必须是 JSON 对象: {text[:120]}")
+                continue
+            commands.append(command)
+        return commands
+
+    def handle_debug_command(self, payload: dict) -> None:
+        command = str(payload.get("command") or payload.get("action") or "").strip().lower()
+        command_id = str(payload.get("id") or "").strip()
+        label = f"{command} ({command_id})" if command_id else command
+        if not command:
+            self.log("system", "远程调试命令缺少 command")
+            return
+
+        self.log("system", f"收到远程调试命令: {label}")
+        try:
+            if command == "status":
+                self.write_debug_status("command:status", force=True)
+            elif command == "stop":
+                app = self.debug_command_app(payload)
+                if app is not None:
+                    self.runners[app.app_id].stop("远程调试命令请求强制退出")
+            elif command == "stop_all":
+                for runner in self.runners.values():
+                    runner.stop("远程调试命令请求强制退出全部")
+            elif command == "start":
+                app = self.debug_command_app(payload)
+                if app is not None:
+                    reason = str(payload.get("reason") or "debug").strip() or "debug"
+                    self.start_app_unattended(
+                        app,
+                        reason=reason,
+                        force=debug_bool(payload.get("force"), default=False),
+                    )
+            elif command == "queue":
+                app = self.debug_command_app(payload)
+                if app is not None and self.app_ready_for_unattended_start(app):
+                    time_value = str(payload.get("time") or "remote").strip() or "remote"
+                    self.queue_scheduled(app, time_value)
+                    self.start_next_scheduled()
+            elif command == "clear_queue":
+                count = len(self.pending_scheduled)
+                self.pending_scheduled.clear()
+                self.log("system", f"远程调试已清空定时队列，移除 {count} 个待执行任务")
+            elif command == "set_schedule":
+                app = self.debug_command_app(payload)
+                if app is not None:
+                    enabled = debug_bool(
+                        payload.get("enabled"),
+                        default=self.settings.app_enabled(app),
+                    )
+                    times = (
+                        debug_times(payload.get("times"))
+                        if "times" in payload
+                        else self.settings.app_times(app)
+                    )
+                    self.settings.update_app(app, enabled, times)
+                    self.rows[app.app_id].refresh()
+                    schedule = "启用" if enabled else "禁用"
+                    display_times = ", ".join(times) if times else "未设置"
+                    self.log(app.app_id, f"远程调试已更新定时: {schedule} | {display_times}")
+            elif command == "reload_settings":
+                self.settings.reload()
+                self.refresh_rows()
+                self.log("system", "远程调试已重新加载 Setting.json")
+            elif command == "exit":
+                force = debug_bool(payload.get("force"), default=False)
+                if force:
+                    for runner in self.runners.values():
+                        runner.stop("远程调试命令请求退出 GUI")
+                self.log("system", "远程调试命令请求退出 GUI")
+                self.root.after(1000 if force else 100, self.root.destroy)
+            else:
+                self.log("system", f"未知远程调试命令: {command}")
+        except Exception as exc:
+            self.log("system", f"远程调试命令失败 {label}: {exc}")
+        finally:
+            self.write_debug_status(f"command:{command}", force=True)
+
+    def debug_command_app(self, payload: dict) -> AppConfig | None:
+        app_id = str(payload.get("app_id") or payload.get("app") or "").strip()
+        if not app_id:
+            self.log("system", "远程调试命令缺少 app_id")
+            return None
+
+        app = self.app_by_id(app_id)
+        if app is None:
+            app_ids = ", ".join(app.app_id for app in APPS)
+            self.log("system", f"未知 app_id: {app_id}，可用值: {app_ids}")
+            return None
+        return app
+
+    def app_ready_for_unattended_start(self, app: AppConfig) -> bool:
+        if not self.settings.app_installed(app):
+            self.log(app.app_id, "远程调试启动被跳过：未安装")
+            return False
+        if app.requires_game_verification and not self.settings.game_verified(app):
+            self.log(app.app_id, "远程调试启动被跳过：未确认游戏位置")
+            return False
+        if app.requires_emulator_verification and not self.settings.mumu_verified(app):
+            self.log(app.app_id, "远程调试启动被跳过：未确认模拟器位置")
+            return False
+        return True
+
+    def start_app_unattended(self, app: AppConfig, reason: str, force: bool) -> None:
+        if not self.app_ready_for_unattended_start(app):
+            return
+        if not force and self.any_running(except_app_id=app.app_id):
+            self.log(app.app_id, "远程调试启动被跳过：已有其他任务运行")
+            return
+        if self.runners[app.app_id].start(reason):
+            self.refresh_rows()
+
+    def write_debug_status(self, reason: str, force: bool = False) -> None:
+        now = datetime.now()
+        if not force and self.debug_status_written_at is not None:
+            status_age = now - self.debug_status_written_at
+            if status_age < timedelta(seconds=DEBUG_STATUS_REFRESH_SECONDS):
+                return
+
+        ensure_dirs()
+        status = {
+            "at": now.isoformat(timespec="seconds"),
+            "reason": reason,
+            "command_file": str(DEBUG_COMMANDS_PATH),
+            "command_file_position": self.debug_command_position,
+            "pending_scheduled": [app.app_id for app in self.pending_scheduled],
+            "apps": {},
+        }
+
+        for app in APPS:
+            app_status = self.runners[app.app_id].snapshot(now)
+            app_status.update(
+                {
+                    "name": app.name,
+                    "installed": self.settings.app_installed(app),
+                    "enabled": self.settings.app_enabled(app),
+                    "times": self.settings.app_times(app),
+                    "game_verified": True
+                    if not app.requires_game_verification
+                    else self.settings.game_verified(app),
+                    "mumu_verified": True
+                    if not app.requires_emulator_verification
+                    else self.settings.mumu_verified(app),
+                }
+            )
+            status["apps"][app.app_id] = app_status
+
+        temp_path = DEBUG_STATUS_PATH.with_suffix(".json.tmp")
+        temp_path.write_text(
+            json.dumps(status, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(DEBUG_STATUS_PATH)
+        self.debug_status_written_at = now
 
     def ensure_game_verified(self, app: AppConfig, force_prompt: bool = False) -> bool:
         if not app.requires_game_verification:
@@ -1414,6 +1752,7 @@ class DailyGui:
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
         self.check_log_archive(now)
+        self.check_scheduled_timeouts(now)
         for app in APPS:
             if not self.settings.app_installed(app):
                 continue
@@ -1438,6 +1777,16 @@ class DailyGui:
         self.refresh_rows()
         self.start_next_scheduled()
         self.root.after(10_000, self.check_schedule)
+
+    def check_scheduled_timeouts(self, now: datetime) -> None:
+        for runner in self.runners.values():
+            elapsed = runner.scheduled_timeout_elapsed(now)
+            if elapsed is None:
+                continue
+            minutes = int(elapsed.total_seconds() // 60)
+            runner.stop(
+                f"定时任务已运行 {minutes} 分钟，超过 {SCHEDULED_RUN_TIMEOUT_MINUTES} 分钟，自动强制退出"
+            )
 
     def check_log_archive(self, now: datetime) -> None:
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
