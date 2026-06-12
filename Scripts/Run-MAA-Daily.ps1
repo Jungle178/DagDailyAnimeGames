@@ -237,6 +237,35 @@ function Require-File {
     }
 }
 
+function Invoke-QuietNativeCommand {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [switch]$IgnoreExitCode
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = ($Arguments -join " ")
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    if ((-not $IgnoreExitCode) -and $process.ExitCode -ne 0) {
+        throw "$FilePath $($Arguments -join ' ') exited with code $($process.ExitCode): $stderr"
+    }
+
+    return $stdout
+}
+
 function Resolve-PowerShellPath {
     $windowsPowerShell = Join-Path $PSHOME "powershell.exe"
     if (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf) {
@@ -338,13 +367,13 @@ function Wait-AdbDevice {
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        & $AdbPath connect $Serial *> $null
-        $devices = & $AdbPath devices
+        Invoke-QuietNativeCommand -FilePath $AdbPath -Arguments @("connect", $Serial) -IgnoreExitCode | Out-Null
+        $devices = Invoke-QuietNativeCommand -FilePath $AdbPath -Arguments @("devices") -IgnoreExitCode
         if ($devices -match ([regex]::Escape($Serial) + "\s+device")) {
             return
         }
         if ($devices -match ([regex]::Escape($Serial) + "\s+offline")) {
-            & $AdbPath disconnect $Serial *> $null
+            Invoke-QuietNativeCommand -FilePath $AdbPath -Arguments @("disconnect", $Serial) -IgnoreExitCode | Out-Null
         }
         Start-Sleep -Seconds 2
     }
@@ -387,11 +416,11 @@ function Reset-AdbConnection {
         [string]$Serial
     )
 
-    & $AdbPath disconnect $Serial *> $null
-    & $AdbPath kill-server *> $null
+    Invoke-QuietNativeCommand -FilePath $AdbPath -Arguments @("disconnect", $Serial) -IgnoreExitCode | Out-Null
+    Invoke-QuietNativeCommand -FilePath $AdbPath -Arguments @("kill-server") -IgnoreExitCode | Out-Null
     Start-Sleep -Seconds 2
-    & $AdbPath start-server *> $null
-    & $AdbPath connect $Serial *> $null
+    Invoke-QuietNativeCommand -FilePath $AdbPath -Arguments @("start-server") -IgnoreExitCode | Out-Null
+    Invoke-QuietNativeCommand -FilePath $AdbPath -Arguments @("connect", $Serial) -IgnoreExitCode | Out-Null
 }
 
 function Invoke-MaaCli {
@@ -476,8 +505,8 @@ finally {
 
     Write-Host "Cleaning ADB connection $Device..."
     try {
-        & $Adb disconnect $Device *> $null
-        & $Adb kill-server *> $null
+        Invoke-QuietNativeCommand -FilePath $Adb -Arguments @("disconnect", $Device) -IgnoreExitCode | Out-Null
+        Invoke-QuietNativeCommand -FilePath $Adb -Arguments @("kill-server") -IgnoreExitCode | Out-Null
     }
     catch {
         Write-Warning "Failed to clean ADB connection: $_"

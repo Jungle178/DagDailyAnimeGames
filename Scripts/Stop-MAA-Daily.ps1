@@ -65,6 +65,28 @@ function Resolve-AdbPath {
     Resolve-FirstExistingFile $candidates
 }
 
+function Invoke-QuietNativeCommand {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = ($Arguments -join " ")
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    $process.StandardOutput.ReadToEnd() | Out-Null
+    $process.StandardError.ReadToEnd() | Out-Null
+    $process.WaitForExit()
+}
+
 $MumuCli = Resolve-MuMuCliPath -ExplicitPath $MumuCli
 $Adb = Resolve-AdbPath -ExplicitPath $Adb -MumuCliPath $MumuCli
 
@@ -78,8 +100,8 @@ else {
 
 if ($Adb) {
     Write-Host "Cleaning ADB connection $Device..."
-    & $Adb disconnect $Device *> $null
-    & $Adb kill-server *> $null
+    Invoke-QuietNativeCommand -FilePath $Adb -Arguments @("disconnect", $Device)
+    Invoke-QuietNativeCommand -FilePath $Adb -Arguments @("kill-server")
 }
 else {
     Write-Host "ADB not found; skipping ADB cleanup."
