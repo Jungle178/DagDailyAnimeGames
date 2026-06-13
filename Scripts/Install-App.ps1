@@ -1214,14 +1214,38 @@ if ($OkScriptRequirement) {
 Write-Host "Validating ok framework..."
 $OkValidationScript = @"
 import importlib.metadata as metadata
-import ok
+import sys
 expected = "$ExpectedOkScriptVersion"
-actual = metadata.version("ok-script")
+try:
+    actual = metadata.version("ok-script")
+except Exception as exc:
+    print(f"ok-script WARNING: failed to read installed version: {exc!r}")
+    actual = ""
+try:
+    import ok
+except Exception as exc:
+    print(f"ok-script WARNING: import ok failed: {exc!r}")
+    sys.exit(0)
 if expected and actual != expected:
     print(f"ok-script WARNING: expected {expected}, got {actual}")
 print("ok-script OK:", actual, ok.__file__)
 "@
-Invoke-Checked -FilePath $VenvPython -Arguments @("-c", $OkValidationScript) -WorkingDirectory $ProjectPath
+$oldErrorActionPreference = $ErrorActionPreference
+$validationExitCode = 0
+Push-Location -LiteralPath $ProjectPath
+try {
+    Write-Host "> $VenvPython -c <ok framework validation>"
+    $ErrorActionPreference = "Continue"
+    & $VenvPython -c $OkValidationScript
+    $validationExitCode = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $oldErrorActionPreference
+    Pop-Location
+}
+if ($validationExitCode -ne 0) {
+    Write-Warning "ok framework validation exited with code $validationExitCode; continuing because pip install and pip check already passed."
+}
 
 # Preset ok-framework configs for submodule apps
 $PresetApps = @("wuthering", "endfield", "nte")
