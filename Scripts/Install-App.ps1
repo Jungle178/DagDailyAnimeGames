@@ -109,6 +109,16 @@ function Save-JsonObject {
     )
 }
 
+function ConvertTo-JsonObject {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value -or -not ($Value -is [PSCustomObject])) {
+        return [PSCustomObject]@{}
+    }
+
+    return $Value
+}
+
 function Write-AppInstallMarker {
     param(
         [string]$Root,
@@ -1214,8 +1224,9 @@ if ($OkScriptRequirement) {
 Write-Host "Validating ok framework..."
 $OkValidationScript = @"
 import importlib.metadata as metadata
+import os
 import sys
-expected = "$ExpectedOkScriptVersion"
+expected = os.environ.get("DAGDAILY_EXPECTED_OK_SCRIPT_VERSION", "")
 try:
     actual = metadata.version("ok-script")
 except Exception as exc:
@@ -1231,17 +1242,31 @@ if expected and actual != expected:
 print("ok-script OK:", actual, ok.__file__)
 "@
 $oldErrorActionPreference = $ErrorActionPreference
+$oldExpectedOkScriptVersion = [Environment]::GetEnvironmentVariable("DAGDAILY_EXPECTED_OK_SCRIPT_VERSION", "Process")
 $validationExitCode = 0
+$validationDir = Join-Path $Root "Apps\_tmp"
+if (-not (Test-Path -LiteralPath $validationDir -PathType Container)) {
+    New-Item -ItemType Directory -Path $validationDir | Out-Null
+}
+$validationScriptPath = Join-Path $validationDir "ok-framework-validation-$PID.py"
+[System.IO.File]::WriteAllText(
+    $validationScriptPath,
+    $OkValidationScript,
+    [System.Text.UTF8Encoding]::new($false)
+)
 Push-Location -LiteralPath $ProjectPath
 try {
-    Write-Host "> $VenvPython -c <ok framework validation>"
+    [Environment]::SetEnvironmentVariable("DAGDAILY_EXPECTED_OK_SCRIPT_VERSION", $ExpectedOkScriptVersion, "Process")
+    Write-Host "> $VenvPython $validationScriptPath"
     $ErrorActionPreference = "Continue"
-    & $VenvPython -c $OkValidationScript
+    & $VenvPython $validationScriptPath
     $validationExitCode = $LASTEXITCODE
 }
 finally {
     $ErrorActionPreference = $oldErrorActionPreference
+    [Environment]::SetEnvironmentVariable("DAGDAILY_EXPECTED_OK_SCRIPT_VERSION", $oldExpectedOkScriptVersion, "Process")
     Pop-Location
+    Remove-Item -LiteralPath $validationScriptPath -Force -ErrorAction SilentlyContinue
 }
 if ($validationExitCode -ne 0) {
     Write-Warning "ok framework validation exited with code $validationExitCode; continuing because pip install and pip check already passed."
@@ -1254,17 +1279,9 @@ if ($PresetApps -contains $AppId) {
 
     # ui_config.json: set light theme
     $UiConfigPath = Join-Path $ConfigsDir "ui_config.json"
-    $uiConfig = Read-JsonObject $UiConfigPath
-    $qfw = if ($uiConfig.PSObject.Properties.Name -contains "QFluentWidgets") {
-        $uiConfig.QFluentWidgets
-    } else {
-        [PSCustomObject]@{}
-    }
-    if ($qfw.PSObject.Properties.Name -contains "ThemeMode") {
-        $qfw.ThemeMode = "Light"
-    } else {
-        Add-Member -InputObject $qfw -MemberType NoteProperty -Name "ThemeMode" -Value "Light"
-    }
+    $uiConfig = ConvertTo-JsonObject (Read-JsonObject $UiConfigPath)
+    $qfw = ConvertTo-JsonObject (Get-JsonPropertyValue -Object $uiConfig -Name "QFluentWidgets")
+    Set-JsonProperty $qfw "ThemeMode" "Light"
     Set-JsonProperty $uiConfig "QFluentWidgets" $qfw
     Save-JsonObject $UiConfigPath $uiConfig
     Write-Host "  Preset: QFluentWidgets.ThemeMode = Light"
