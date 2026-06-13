@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import queue
 import re
 import subprocess
 import threading
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -70,6 +72,35 @@ CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 TASK_PROCESS_FLAGS = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW if os.name == "nt" else 0
 HIDDEN_PROCESS_FLAGS = CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+class SingleInstanceLock:
+    ERROR_ALREADY_EXISTS = 183
+
+    def __init__(self, name: str):
+        self.handle: int | None = None
+        self._kernel32 = None
+        self.already_exists = False
+        if os.name != "nt":
+            return
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.CreateMutexW(None, False, name)
+        if not handle:
+            return
+        self.handle = handle
+        self._kernel32 = kernel32
+        self.already_exists = ctypes.get_last_error() == self.ERROR_ALREADY_EXISTS
+
+    def close(self) -> None:
+        if self.handle and self._kernel32:
+            self._kernel32.CloseHandle(self.handle)
+        self.handle = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +207,18 @@ APPS: tuple[AppConfig, ...] = (
         workdir=ROOT,
         icon=WUTHERING_ICON,
         default_times=(),
+        cleanup_commands=(
+            (
+                POWERSHELL,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(SCRIPTS / "Stop-Ok-App.ps1"),
+                "-AppId",
+                "wuthering",
+            ),
+        ),
     ),
     AppConfig(
         app_id="endfield",
@@ -186,6 +229,18 @@ APPS: tuple[AppConfig, ...] = (
         icon=ENDFIELD_ICON,
         default_times=(),
         requires_game_verification=False,
+        cleanup_commands=(
+            (
+                POWERSHELL,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(SCRIPTS / "Stop-Ok-App.ps1"),
+                "-AppId",
+                "endfield",
+            ),
+        ),
     ),
     AppConfig(
         app_id="nte",
@@ -196,6 +251,18 @@ APPS: tuple[AppConfig, ...] = (
         icon=NTE_ICON,
         default_times=(),
         requires_game_verification=False,
+        cleanup_commands=(
+            (
+                POWERSHELL,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(SCRIPTS / "Stop-Ok-App.ps1"),
+                "-AppId",
+                "nte",
+            ),
+        ),
     ),
 )
 
@@ -889,6 +956,16 @@ class AppRunner:
 
         exit_code = process.wait()
         self.log(f"任务结束，退出码: {exit_code}")
+        with self.lock:
+            should_cleanup = (
+                self.process is process
+                and exit_code != 0
+                and not self.stop_requested
+                and bool(self.app.cleanup_commands)
+            )
+        if should_cleanup:
+            self.log("任务失败，执行残留清理")
+            self._cleanup()
         with self.lock:
             if self.process is process:
                 self.process = None
@@ -1979,8 +2056,15 @@ def main() -> int:
     if args.check:
         return check_config()
 
-    DailyGui().run()
-    return 0
+    instance_lock = SingleInstanceLock("DagDailyAnimeGames.LocalDailyGui")
+    if instance_lock.already_exists:
+        return 0
+
+    try:
+        DailyGui().run()
+        return 0
+    finally:
+        instance_lock.close()
 
 
 if __name__ == "__main__":

@@ -10,11 +10,15 @@ param(
     [string]$Enabled = "",
     [switch]$Force,
     [string]$Time = "",
-    [string]$Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path,
+    [string]$Root = "",
     [string]$RawJson = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $Root) {
+    $Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+}
 
 $commandPath = Join-Path $Root "Logs\LocalDailyGui\debug_commands.jsonl"
 $commandDir = Split-Path -Parent $commandPath

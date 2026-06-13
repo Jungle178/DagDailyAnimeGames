@@ -1,5 +1,5 @@
 param(
-    [string]$Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path,
+    [string]$Root = "",
     [string]$GameExe = "",
     [int]$TaskIndex = 1,
     [switch]$RunTask,
@@ -215,6 +215,13 @@ function Start-ProcessAndMaybeWait {
     Write-Host "Waiting up to $Timeout seconds for process id $($process.Id)..."
     $exited = $process.WaitForExit($Timeout * 1000)
     if (-not $exited) {
+        Write-Host "Force stopping timed-out process tree PID=$($process.Id)"
+        $output = & taskkill /PID $process.Id /T /F 2>&1
+        foreach ($line in @($output)) {
+            if ($null -ne $line -and "$line".Trim()) {
+                Write-Host $line
+            }
+        }
         throw "Process did not exit within $Timeout seconds: pid $($process.Id)"
     }
 
@@ -503,6 +510,9 @@ function Stop-Game {
     }
 }
 
+if (-not $Root) {
+    $Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+}
 $Root = Resolve-FullPath $Root
 $ProjectDir = Join-Path $Root "src\ok-wuthering-waves"
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
@@ -547,7 +557,7 @@ if ($Gui) {
     Write-Host "-Gui is now the default for ok-wuthering-waves; starting without the headless flag."
 }
 
-$mainArgs = @("main.py", "-t", "$TaskIndex", "-e")
+$mainArgs = @((Join-Path $ProjectDir "main.py"), "-t", "$TaskIndex", "-e")
 
 $isAdmin = Test-IsAdmin
 if ($NoElevate -and -not $isAdmin) {

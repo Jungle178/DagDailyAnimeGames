@@ -4,11 +4,15 @@ param(
     [string]$RequirementsPath = "",
     [switch]$Recreate,
     [switch]$SkipInstall,
+    [switch]$SkipPythonInstall,
     [switch]$SkipValidation
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$BundledPythonVersion = "3.12.10"
 
 function Resolve-FullPath {
     param([string]$Path)
@@ -53,17 +57,72 @@ function Require-Directory {
     }
 }
 
-function Get-Python312 {
-    $candidates = @(
-        @{ FilePath = "py"; Arguments = @("-3.12") },
-        @{ FilePath = "python"; Arguments = @() }
+function Get-PythonVersionText {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments = @()
     )
 
-    foreach ($candidate in $candidates) {
+    $versionArgs = @($Arguments) + @("-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
+    $version = & $FilePath @versionArgs
+    if ($LASTEXITCODE -ne 0) {
+        return ""
+    }
+
+    [string]($version | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -First 1)
+}
+
+function Test-CompatiblePythonVersion {
+    param([string]$Version)
+
+    $match = [regex]::Match($Version, "^(\d+)\.(\d+)(?:\.(\d+))?$")
+    if (-not $match.Success) {
+        return $false
+    }
+
+    $major = [int]$match.Groups[1].Value
+    $minor = [int]$match.Groups[2].Value
+    return ($major -eq 3 -and $minor -in @(11, 12, 13))
+}
+
+function Get-PythonCandidateList {
+    $candidates = @(
+        @{ FilePath = "py"; Arguments = @("-3.12") },
+        @{ FilePath = "py"; Arguments = @("-3.13") },
+        @{ FilePath = "py"; Arguments = @("-3.11") }
+    )
+
+    $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+    if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+        $localPythonRoot = Join-Path $localAppData "Programs\Python"
+        foreach ($directoryName in @("Python312", "Python313", "Python311")) {
+            $candidates += @{ FilePath = (Join-Path (Join-Path $localPythonRoot $directoryName) "python.exe"); Arguments = @() }
+        }
+    }
+
+    foreach ($programRoot in @($env:ProgramFiles, [Environment]::GetEnvironmentVariable("ProgramFiles(x86)"))) {
+        if ([string]::IsNullOrWhiteSpace($programRoot)) {
+            continue
+        }
+        foreach ($directoryName in @("Python312", "Python313", "Python311")) {
+            $candidates += @{ FilePath = (Join-Path (Join-Path $programRoot $directoryName) "python.exe"); Arguments = @() }
+        }
+    }
+
+    $candidates += @(
+        @{ FilePath = "python"; Arguments = @() },
+        @{ FilePath = "python3"; Arguments = @() }
+    )
+
+    $candidates
+}
+
+function Get-CompatiblePython {
+    foreach ($candidate in (Get-PythonCandidateList)) {
         try {
-            $versionArgs = @($candidate.Arguments) + @("-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-            $version = & $candidate.FilePath @versionArgs
-            if ($LASTEXITCODE -eq 0 -and ($version | Select-Object -First 1) -eq "3.12") {
+            $version = Get-PythonVersionText -FilePath $candidate.FilePath -Arguments $candidate.Arguments
+            if (Test-CompatiblePythonVersion $version) {
+                $candidate["Version"] = $version
                 return $candidate
             }
         }
@@ -72,7 +131,114 @@ function Get-Python312 {
         }
     }
 
-    throw "Python 3.12 was not found. Install Python 3.12 or make sure 'py -3.12' works."
+    return $null
+}
+
+function Get-PythonInstallerInfo {
+    $architecture = $env:PROCESSOR_ARCHITECTURE
+    if ([string]::IsNullOrWhiteSpace($architecture)) {
+        $architecture = ""
+    }
+
+    if ($architecture -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64") {
+        $fileName = "python-$BundledPythonVersion-arm64.exe"
+    }
+    elseif ([Environment]::Is64BitOperatingSystem) {
+        $fileName = "python-$BundledPythonVersion-amd64.exe"
+    }
+    else {
+        $fileName = "python-$BundledPythonVersion.exe"
+    }
+
+    [PSCustomObject]@{
+        FileName = $fileName
+        Uri = "https://www.python.org/ftp/python/$BundledPythonVersion/$fileName"
+    }
+}
+
+function Save-UrlToFile {
+    param(
+        [string]$Uri,
+        [string]$Destination
+    )
+
+    if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+        Write-Host "Using cached download: $Destination"
+        return
+    }
+
+    $directory = Split-Path -Parent $Destination
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        New-Item -ItemType Directory -Path $directory | Out-Null
+    }
+
+    Write-Host "Downloading Python installer: $Uri"
+    $oldProgressPreference = $ProgressPreference
+    try {
+        $ProgressPreference = "SilentlyContinue"
+        Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing
+    }
+    catch {
+        throw "Failed to download Python installer from $Uri. $_"
+    }
+    finally {
+        $ProgressPreference = $oldProgressPreference
+    }
+
+    Require-File $Destination
+}
+
+function Invoke-PythonInstaller {
+    param(
+        [string]$InstallerPath,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory
+    )
+
+    Push-Location -LiteralPath $WorkingDirectory
+    try {
+        Write-Host "> $InstallerPath $($Arguments -join ' ')"
+        & $InstallerPath @Arguments
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0 -and $exitCode -ne 3010) {
+            throw "$InstallerPath $($Arguments -join ' ') exited with code $exitCode"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Install-LocalPython {
+    param([string]$RootPath)
+
+    $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        throw "Cannot resolve LocalApplicationData; install Python 3.11, 3.12, or 3.13 manually and retry."
+    }
+
+    $installerInfo = Get-PythonInstallerInfo
+    $downloadDir = Join-Path $RootPath "Apps\_downloads\python"
+    $installerPath = Join-Path $downloadDir $installerInfo.FileName
+    Save-UrlToFile -Uri $installerInfo.Uri -Destination $installerPath
+
+    $targetDir = Join-Path $localAppData "Programs\Python\Python312"
+    $installerArgs = @(
+        "/quiet",
+        "InstallAllUsers=0",
+        "InstallLauncherAllUsers=0",
+        "TargetDir=$targetDir",
+        "PrependPath=1",
+        "Include_launcher=1",
+        "Include_pip=1",
+        "Include_tcltk=1",
+        "Include_test=0",
+        "Include_doc=0",
+        "Shortcuts=0"
+    )
+
+    Write-Host "Installing Python $BundledPythonVersion to: $targetDir"
+    Invoke-PythonInstaller -InstallerPath $installerPath -Arguments $installerArgs -WorkingDirectory $RootPath
 }
 
 function Remove-VenvSafely {
@@ -122,18 +288,55 @@ if ($Recreate) {
     Remove-VenvSafely -RootPath $Root -VenvPath $VenvPath
 }
 
-if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
-    $python = Get-Python312
-    Write-Host "Creating venv: $VenvPath"
-    Invoke-Checked -FilePath $python.FilePath -Arguments (@($python.Arguments) + @("-m", "venv", $VenvPath)) -WorkingDirectory $Root
+if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
+    try {
+        $venvVersion = Get-PythonVersionText -FilePath $VenvPython
+    }
+    catch {
+        $venvVersion = ""
+    }
+
+    if (Test-CompatiblePythonVersion $venvVersion) {
+        Write-Host "Using existing venv: $VenvPath (Python $venvVersion)"
+    }
+    else {
+        if ([string]::IsNullOrWhiteSpace($venvVersion)) {
+            Write-Host "Existing venv Python is broken; recreating shared venv."
+        }
+        else {
+            Write-Host "Existing venv uses unsupported Python $venvVersion; recreating shared venv."
+        }
+        Remove-VenvSafely -RootPath $Root -VenvPath $VenvPath
+    }
 }
-else {
-    Write-Host "Using existing venv: $VenvPath"
+elseif (Test-Path -LiteralPath $VenvPath -PathType Container) {
+    Write-Host "Existing venv is incomplete; recreating shared venv."
+    Remove-VenvSafely -RootPath $Root -VenvPath $VenvPath
+}
+
+if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
+    $python = Get-CompatiblePython
+    if ($null -eq $python) {
+        if ($SkipPythonInstall) {
+            throw "Compatible Python was not found. Install Python 3.11, 3.12, or 3.13 manually and retry."
+        }
+
+        Write-Host "Compatible Python was not found. Installing Python $BundledPythonVersion..."
+        Install-LocalPython -RootPath $Root
+        $python = Get-CompatiblePython
+        if ($null -eq $python) {
+            throw "Python installer completed, but compatible Python was not found. Install Python 3.11, 3.12, or 3.13 manually and retry."
+        }
+    }
+
+    Write-Host "Creating venv: $VenvPath (Python $($python.Version))"
+    Invoke-Checked -FilePath $python.FilePath -Arguments (@($python.Arguments) + @("-m", "venv", $VenvPath)) -WorkingDirectory $Root
 }
 
 Require-File $VenvPython
 
 if (-not $SkipInstall) {
+    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "ensurepip", "--upgrade") -WorkingDirectory $Root
     Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-U", "pip", "setuptools", "wheel") -WorkingDirectory $Root
     Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-U", "-r", $RequirementsPath) -WorkingDirectory $Root
 }

@@ -1048,9 +1048,12 @@ $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $SetupScript = Join-Path $Root "Scripts\Setup-OkSharedVenv.ps1"
 
 Require-File $SetupScript
-if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
-    Invoke-Checked -FilePath "powershell.exe" -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $SetupScript) -WorkingDirectory $Root
+Write-Host "Preparing shared Python environment..."
+$setupArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $SetupScript)
+if ($SkipInstall) {
+    $setupArgs += "-SkipInstall"
 }
+Invoke-Checked -FilePath "powershell.exe" -Arguments $setupArgs -WorkingDirectory $Root
 
 Write-Host "Installing $($App.Name)..."
 Require-Git
@@ -1060,6 +1063,12 @@ Require-File $RequirementsPath
 Require-File $MainPath
 Require-File $VenvPython
 
+$OkScriptRequirement = Select-String -LiteralPath $RequirementsPath -Pattern "^\s*ok-script==([^\s;#]+)" | Select-Object -First 1
+$ExpectedOkScriptVersion = ""
+if ($OkScriptRequirement) {
+    $ExpectedOkScriptVersion = $OkScriptRequirement.Matches[0].Groups[1].Value
+}
+
 if (-not $SkipInstall) {
     Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-U", "-r", $RequirementsPath) -WorkingDirectory $Root
     Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "check") -WorkingDirectory $Root
@@ -1067,6 +1076,18 @@ if (-not $SkipInstall) {
 else {
     Write-Host "Skipping dependency installation."
 }
+
+Write-Host "Validating ok framework..."
+$OkValidationScript = @"
+import importlib.metadata as metadata
+import ok
+expected = "$ExpectedOkScriptVersion"
+actual = metadata.version("ok-script")
+if expected and actual != expected:
+    raise SystemExit(f"ok-script version mismatch: expected {expected}, got {actual}")
+print("ok-script OK:", actual, ok.__file__)
+"@
+Invoke-Checked -FilePath $VenvPython -Arguments @("-c", $OkValidationScript) -WorkingDirectory $ProjectPath
 
 # Preset ok-framework configs for submodule apps
 $PresetApps = @("wuthering", "endfield", "nte")
