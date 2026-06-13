@@ -1,5 +1,6 @@
 param(
     [switch]$Check,
+    [switch]$Elevate,
     [switch]$NoElevate,
     [string]$Root = ""
 )
@@ -20,7 +21,11 @@ function Test-IsAdmin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-if (-not $NoElevate -and -not (Test-IsAdmin)) {
+if ($Elevate -and $NoElevate) {
+    throw "Use only one of -Elevate or -NoElevate."
+}
+
+if ($Elevate -and -not (Test-IsAdmin)) {
     $scriptPath = $PSCommandPath
     $elevatedArgs = @(
         "-NoProfile",
@@ -32,6 +37,10 @@ if (-not $NoElevate -and -not (Test-IsAdmin)) {
     if ($Check) {
         $elevatedArgs += "-Check"
     }
+    if ($Root) {
+        $elevatedArgs += @("-Root", "`"$Root`"")
+    }
+    $elevatedArgs += "-NoElevate"
 
     Start-Process -FilePath "powershell.exe" -ArgumentList $elevatedArgs -Verb RunAs -WindowStyle Hidden
     exit 0

@@ -14,6 +14,12 @@
 
 `Run.bat` 会检测 `.venv` 是否存在且能加载 GUI 依赖；缺失时会自动创建环境，然后启动 GUI。
 
+默认按当前登录用户运行，不会自动 UAC 提权到管理员账户。确实需要管理员上下文时，可显式运行：
+
+```powershell
+.\Scripts\Start-LocalDailyGui.ps1 -Elevate
+```
+
 ## 开机自启动
 
 注册 Windows 登录自启动计划任务：
@@ -21,6 +27,8 @@
 ```powershell
 .\Scripts\Register-StartupTask.ps1
 ```
+
+默认会给当前登录用户注册非提权的登录自启动任务。需要注册为管理员高权限任务时，显式加 `-Elevate`。
 
 ## 无人值守远程调试
 

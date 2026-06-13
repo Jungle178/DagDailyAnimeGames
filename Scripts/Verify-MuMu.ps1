@@ -39,12 +39,25 @@ function Set-JsonProperty {
         [object]$Value
     )
 
-    if ($Object.PSObject.Properties.Name -contains $Name) {
+    if (Test-JsonProperty -Object $Object -Name $Name) {
         $Object.$Name = $Value
     }
     else {
         Add-Member -InputObject $Object -MemberType NoteProperty -Name $Name -Value $Value
     }
+}
+
+function Test-JsonProperty {
+    param(
+        [AllowNull()][object]$Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object) {
+        return $false
+    }
+
+    $null -ne $Object.PSObject.Properties[$Name]
 }
 
 function Save-JsonObject {
@@ -72,7 +85,7 @@ function Get-OrCreateJsonObjectProperty {
         [string]$Name
     )
 
-    if (-not ($Object.PSObject.Properties.Name -contains $Name) -or $null -eq $Object.$Name) {
+    if (-not (Test-JsonProperty -Object $Object -Name $Name) -or $null -eq $Object.$Name) {
         Set-JsonProperty $Object $Name ([PSCustomObject]@{})
     }
 
@@ -119,7 +132,7 @@ function Update-RootSettings {
 
     $appIds = @("maa")
     foreach ($appId in $appIds) {
-        if (-not ($apps.PSObject.Properties.Name -contains $appId) -or $null -eq $apps.$appId) {
+        if (-not (Test-JsonProperty -Object $apps -Name $appId) -or $null -eq $apps.$appId) {
             Set-JsonProperty $apps $appId ([PSCustomObject]@{})
         }
 
@@ -128,18 +141,18 @@ function Update-RootSettings {
         Set-JsonProperty $appSettings "mumu_cli" $MumuCliPath
         Set-JsonProperty $appSettings "mumu_verified" $true
 
-        if (-not ($appSettings.PSObject.Properties.Name -contains "enabled")) {
+        if (-not (Test-JsonProperty -Object $appSettings -Name "enabled")) {
             Set-JsonProperty $appSettings "enabled" $false
         }
-        if (-not ($appSettings.PSObject.Properties.Name -contains "times")) {
+        if (-not (Test-JsonProperty -Object $appSettings -Name "times")) {
             Set-JsonProperty $appSettings "times" @()
         }
     }
 
-    if (-not ($settings.PSObject.Properties.Name -contains "last_runs")) {
+    if (-not (Test-JsonProperty -Object $settings -Name "last_runs")) {
         Set-JsonProperty $settings "last_runs" ([PSCustomObject]@{})
     }
-    if (-not ($settings.PSObject.Properties.Name -contains "log_archives")) {
+    if (-not (Test-JsonProperty -Object $settings -Name "log_archives")) {
         Set-JsonProperty $settings "log_archives" ([PSCustomObject]@{})
     }
 

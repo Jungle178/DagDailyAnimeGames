@@ -26,7 +26,7 @@ function Get-JsonPropertyValue {
     if ($null -eq $Object) {
         return $null
     }
-    if ($Object.PSObject.Properties.Name -contains $Name) {
+    if ($null -ne $Object.PSObject.Properties[$Name]) {
         return $Object.$Name
     }
     return $null

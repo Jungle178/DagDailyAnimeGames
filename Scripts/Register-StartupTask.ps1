@@ -5,6 +5,7 @@ param(
     [switch]$RunNow,
     [switch]$Unregister,
     [switch]$Status,
+    [switch]$Elevate,
     [switch]$NoElevate
 )
 
@@ -102,8 +103,11 @@ function Show-StartupTaskStatus {
     } | Format-List
 }
 
-$needsAdmin = -not $Status
-if ($needsAdmin -and -not $NoElevate -and -not (Test-IsAdmin)) {
+if ($Elevate -and $NoElevate) {
+    throw "Use only one of -Elevate or -NoElevate."
+}
+
+if ((-not $Status) -and $Elevate -and -not (Test-IsAdmin)) {
     Invoke-ElevatedSelf
 }
 
@@ -129,6 +133,7 @@ if (-not (Test-Path -LiteralPath $runBat -PathType Leaf)) {
 }
 
 $userName = Get-CurrentUserName
+$runLevel = if (Test-IsAdmin) { "Highest" } else { "Limited" }
 $action = New-ScheduledTaskAction `
     -Execute "cmd.exe" `
     -Argument "/c `"$runBat`"" `
@@ -142,7 +147,7 @@ if ($DelaySeconds -gt 0) {
 $principal = New-ScheduledTaskPrincipal `
     -UserId $userName `
     -LogonType Interactive `
-    -RunLevel Highest
+    -RunLevel $runLevel
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -161,6 +166,7 @@ Register-ScheduledTask `
 
 Write-Host "Registered startup task: $TaskName"
 Write-Host "User: $userName"
+Write-Host "RunLevel: $runLevel"
 Write-Host "Action: cmd.exe /c `"$runBat`""
 Write-Host "Delay: $DelaySeconds seconds after logon"
 

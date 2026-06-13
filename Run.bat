@@ -16,5 +16,5 @@ if errorlevel 1 (
 )
 
 :run
-start "" powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File "%ROOT%Scripts\Start-LocalDailyGui.ps1"
+start "" powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File "%ROOT%Scripts\Start-LocalDailyGui.ps1" -NoElevate
 exit /b 0
