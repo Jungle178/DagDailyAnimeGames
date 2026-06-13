@@ -188,27 +188,6 @@ function Save-UrlToFile {
     Require-File $Destination
 }
 
-function Invoke-PythonInstaller {
-    param(
-        [string]$InstallerPath,
-        [string[]]$Arguments,
-        [string]$WorkingDirectory
-    )
-
-    Push-Location -LiteralPath $WorkingDirectory
-    try {
-        Write-Host "> $InstallerPath $($Arguments -join ' ')"
-        & $InstallerPath @Arguments
-        $exitCode = $LASTEXITCODE
-        if ($exitCode -ne 0 -and $exitCode -ne 3010) {
-            throw "$InstallerPath $($Arguments -join ' ') exited with code $exitCode"
-        }
-    }
-    finally {
-        Pop-Location
-    }
-}
-
 function Install-LocalPython {
     param([string]$RootPath)
 
@@ -223,13 +202,16 @@ function Install-LocalPython {
     Save-UrlToFile -Uri $installerInfo.Uri -Destination $installerPath
 
     $targetDir = Join-Path $localAppData "Programs\Python\Python312"
+    $logPath = Join-Path $downloadDir "python-$BundledPythonVersion-install.log"
     $installerArgs = @(
         "/quiet",
+        "/log",
+        $logPath,
         "InstallAllUsers=0",
         "InstallLauncherAllUsers=0",
         "TargetDir=$targetDir",
-        "PrependPath=1",
-        "Include_launcher=1",
+        "PrependPath=0",
+        "Include_launcher=0",
         "Include_pip=1",
         "Include_tcltk=1",
         "Include_test=0",
@@ -238,7 +220,23 @@ function Install-LocalPython {
     )
 
     Write-Host "Installing Python $BundledPythonVersion to: $targetDir"
-    Invoke-PythonInstaller -InstallerPath $installerPath -Arguments $installerArgs -WorkingDirectory $RootPath
+    Push-Location -LiteralPath $RootPath
+    try {
+        Write-Host "> $installerPath $($installerArgs -join ' ')"
+        & $installerPath @installerArgs
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0 -and $exitCode -ne 3010) {
+            if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+                Write-Host "Python installer log: $logPath"
+                Get-Content -LiteralPath $logPath -Tail 40 -ErrorAction SilentlyContinue |
+                    ForEach-Object { Write-Host "[python-installer] $_" }
+            }
+            throw "$installerPath $($installerArgs -join ' ') exited with code $exitCode"
+        }
+    }
+    finally {
+        Pop-Location
+    }
 }
 
 function Remove-VenvSafely {
