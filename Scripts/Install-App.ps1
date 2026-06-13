@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("maa", "maa-gui", "bettergi", "wuthering", "endfield", "nte")]
+    [ValidateSet("maa", "maa-gui", "bettergi", "wuthering", "endfield", "nte", "starrail")]
     [string]$AppId,
     [string]$Root = "",
     [string]$MaaDir = "",
@@ -197,6 +197,69 @@ function Use-GitRuntimePath {
     catch {
         Write-Warning "Failed to resolve git exec path: $_"
     }
+}
+
+function ConvertTo-GitBashPath {
+    param([string]$Path)
+
+    $resolved = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    if ($resolved -match "^([A-Za-z]):\\?(.*)$") {
+        $drive = $Matches[1].ToLowerInvariant()
+        $rest = $Matches[2].Replace("\", "/")
+        if ($rest) {
+            return "/$drive/$rest"
+        }
+        return "/$drive"
+    }
+    return $resolved.Replace("\", "/")
+}
+
+function ConvertTo-BashSingleQuoted {
+    param([string]$Value)
+
+    return "'" + $Value.Replace("'", "'\''") + "'"
+}
+
+function Get-GitBashPath {
+    $gitCommand = Get-Command "git.exe" -ErrorAction SilentlyContinue
+    if ($gitCommand) {
+        $gitCmdDir = Split-Path -Parent $gitCommand.Source
+        $gitRoot = Split-Path -Parent $gitCmdDir
+        $candidate = Join-Path $gitRoot "bin\bash.exe"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+
+    $fallback = "C:\Program Files\Git\bin\bash.exe"
+    if (Test-Path -LiteralPath $fallback -PathType Leaf) {
+        return $fallback
+    }
+    throw "Git Bash was not found. Please install Git for Windows (https://git-scm.com/download/win) and try again."
+}
+
+function Invoke-GitBash {
+    param(
+        [string[]]$Arguments,
+        [string]$WorkingDirectory
+    )
+
+    $bash = Get-GitBashPath
+    $bashWorkdir = ConvertTo-GitBashPath $WorkingDirectory
+    $quotedArgs = @($Arguments | ForEach-Object { ConvertTo-BashSingleQuoted $_ })
+    $command = "cd $(ConvertTo-BashSingleQuoted $bashWorkdir) && git $($quotedArgs -join ' ')"
+    Invoke-Checked -FilePath $bash -Arguments @("-lc", $command) -WorkingDirectory $WorkingDirectory
+}
+
+function Test-GitWorkTree {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return $false
+    }
+
+    & git -C $Path rev-parse --is-inside-work-tree *> $null
+    return $LASTEXITCODE -eq 0
 }
 
 function Get-GitHubLatestRelease {
@@ -947,9 +1010,10 @@ function Install-BetterGiRelease {
 }
 
 $Apps = @{
-    wuthering = @{ Path = "src\ok-wuthering-waves"; Name = "ok-wuthering-waves" }
-    endfield = @{ Path = "src\ok-end-field"; Name = "ok-end-field" }
-    nte = @{ Path = "src\ok-nte"; Name = "ok-nte" }
+    wuthering = @{ Path = "src\ok-wuthering-waves"; Name = "ok-wuthering-waves"; Framework = "ok" }
+    endfield = @{ Path = "src\ok-end-field"; Name = "ok-end-field"; Framework = "ok" }
+    nte = @{ Path = "src\ok-nte"; Name = "ok-nte"; Framework = "ok" }
+    starrail = @{ Path = "src\StarRailAssistant"; Name = "StarRailAssistant"; Framework = "sra" }
 }
 
 if (-not $Root) {
@@ -1044,37 +1108,67 @@ $App = $Apps[$AppId]
 $ProjectPath = Join-Path $Root $App.Path
 $RequirementsPath = Join-Path $ProjectPath "requirements.txt"
 $MainPath = Join-Path $ProjectPath "main.py"
-$VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
+$Framework = [string]$App.Framework
+$VenvName = if ($Framework -eq "sra") { ".venv-sra" } else { ".venv" }
+$VenvPython = Join-Path $Root "$VenvName\Scripts\python.exe"
 $SetupScript = Join-Path $Root "Scripts\Setup-OkSharedVenv.ps1"
 
 Require-File $SetupScript
-Write-Host "Preparing shared Python environment..."
-$setupArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $SetupScript)
+
+Write-Host "Installing $($App.Name)..."
+Require-Git
+if (Test-GitWorkTree -Path $ProjectPath) {
+    Write-Host "Using existing source checkout: $ProjectPath"
+}
+else {
+    $submodulePathSpec = $App.Path.Replace("\", "/")
+    Invoke-GitBash -Arguments @("-c", "core.longpaths=true", "submodule", "update", "--init", "--recursive", "--", $submodulePathSpec) -WorkingDirectory $Root
+}
+
+Require-File $RequirementsPath
+Require-File $MainPath
+
+Write-Host "Preparing Python environment: $VenvName"
+$setupArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $SetupScript, "-VenvName", $VenvName)
+if ($Framework -eq "sra") {
+    $setupArgs += @("-RequirementsPath", $RequirementsPath, "-SkipValidation")
+}
 if ($SkipInstall) {
     $setupArgs += "-SkipInstall"
 }
 Invoke-Checked -FilePath "powershell.exe" -Arguments $setupArgs -WorkingDirectory $Root
 
-Write-Host "Installing $($App.Name)..."
-Require-Git
-Invoke-Checked -FilePath "git" -Arguments @("-c", "core.longpaths=true", "submodule", "update", "--init", "--recursive", "--", $App.Path) -WorkingDirectory $Root
-
-Require-File $RequirementsPath
-Require-File $MainPath
 Require-File $VenvPython
+
+if ($Framework -eq "ok" -and -not $SkipInstall) {
+    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-U", "-r", $RequirementsPath) -WorkingDirectory $Root
+    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "check") -WorkingDirectory $Root
+}
+else {
+    if ($Framework -eq "ok") {
+        Write-Host "Skipping dependency installation."
+    }
+    elseif (-not $SkipInstall) {
+        Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "check") -WorkingDirectory $Root
+    }
+}
+
+if ($Framework -eq "sra") {
+    if ($SkipInstall) {
+        Write-Host "Skipping StarRailAssistant dependency validation."
+    }
+    else {
+        Write-Host "Validating StarRailAssistant..."
+        Invoke-Checked -FilePath $VenvPython -Arguments @($MainPath, "--version", "--no-admin") -WorkingDirectory $ProjectPath
+    }
+    Write-Host "$($App.Name) is ready."
+    exit 0
+}
 
 $OkScriptRequirement = Select-String -LiteralPath $RequirementsPath -Pattern "^\s*ok-script==([^\s;#]+)" | Select-Object -First 1
 $ExpectedOkScriptVersion = ""
 if ($OkScriptRequirement) {
     $ExpectedOkScriptVersion = $OkScriptRequirement.Matches[0].Groups[1].Value
-}
-
-if (-not $SkipInstall) {
-    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-U", "-r", $RequirementsPath) -WorkingDirectory $Root
-    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "check") -WorkingDirectory $Root
-}
-else {
-    Write-Host "Skipping dependency installation."
 }
 
 Write-Host "Validating ok framework..."

@@ -10,3 +10,7 @@
 	path = src/ok-wuthering-waves
 	url = https://github.com/ok-oldking/ok-wuthering-waves.git
 	branch = master
+[submodule "src/StarRailAssistant"]
+	path = src/StarRailAssistant
+	url = https://github.com/Shasnow/StarRailAssistant.git
+	branch = main

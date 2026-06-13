@@ -37,6 +37,9 @@
 - `src/ok-end-field` -> `origin/master`
 - `src/ok-nte` -> `origin/main`
 - `src/ok-wuthering-waves` -> `origin/master`
+- `src/StarRailAssistant` -> `origin/main`
+
+GUI 菜单里的“更新 -> 定时设置”只更新已下载的 `src/` 子项目，不更新正在运行的父仓库本身。
 
 ## 关联项目
 
@@ -47,3 +50,4 @@
 | ok-end-field | https://github.com/AliceJump/ok-end-field |
 | ok-nte | https://github.com/BnanZ0/ok-nte |
 | ok-wuthering-waves | https://github.com/ok-oldking/ok-wuthering-waves |
+| StarRailAssistant | https://github.com/Shasnow/StarRailAssistant |

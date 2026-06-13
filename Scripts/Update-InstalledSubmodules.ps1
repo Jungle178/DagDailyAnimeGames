@@ -1,5 +1,6 @@
 param(
-    [string]$Root = ""
+    [string]$Root = "",
+    [switch]$SkipRoot
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,6 +62,58 @@ function Use-GitRuntimePath {
     }
 }
 
+function ConvertTo-GitBashPath {
+    param([string]$Path)
+
+    $resolved = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    if ($resolved -match "^([A-Za-z]):\\?(.*)$") {
+        $drive = $Matches[1].ToLowerInvariant()
+        $rest = $Matches[2].Replace("\", "/")
+        if ($rest) {
+            return "/$drive/$rest"
+        }
+        return "/$drive"
+    }
+    return $resolved.Replace("\", "/")
+}
+
+function ConvertTo-BashSingleQuoted {
+    param([string]$Value)
+
+    return "'" + $Value.Replace("'", "'\''") + "'"
+}
+
+function Get-GitBashPath {
+    $gitCommand = Get-Command "git.exe" -ErrorAction SilentlyContinue
+    if ($gitCommand) {
+        $gitCmdDir = Split-Path -Parent $gitCommand.Source
+        $gitRoot = Split-Path -Parent $gitCmdDir
+        $candidate = Join-Path $gitRoot "bin\bash.exe"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+
+    $fallback = "C:\Program Files\Git\bin\bash.exe"
+    if (Test-Path -LiteralPath $fallback -PathType Leaf) {
+        return $fallback
+    }
+    throw "Git Bash was not found. Please install Git for Windows (https://git-scm.com/download/win) and try again."
+}
+
+function Invoke-GitBash {
+    param(
+        [string[]]$Arguments,
+        [string]$WorkingDirectory
+    )
+
+    $bash = Get-GitBashPath
+    $bashWorkdir = ConvertTo-GitBashPath $WorkingDirectory
+    $quotedArgs = @($Arguments | ForEach-Object { ConvertTo-BashSingleQuoted $_ })
+    $command = "cd $(ConvertTo-BashSingleQuoted $bashWorkdir) && git $($quotedArgs -join ' ')"
+    Invoke-Checked -FilePath $bash -Arguments @("-lc", $command) -WorkingDirectory $WorkingDirectory
+}
+
 function Test-GitWorkTree {
     param([string]$Path)
 
@@ -117,11 +170,17 @@ if (-not $gitCmd) {
 }
 Write-Host "Found git: $($gitCmd.Source)"
 
-Update-RootRepository -Path $Root
+if ($SkipRoot) {
+    Write-Host "Skipping root repository update."
+}
+else {
+    Update-RootRepository -Path $Root
+}
 $Submodules = @(
     @{ Path = "src\ok-end-field"; Branch = "master"; Name = "ok-end-field" },
     @{ Path = "src\ok-nte"; Branch = "main"; Name = "ok-nte" },
-    @{ Path = "src\ok-wuthering-waves"; Branch = "master"; Name = "ok-wuthering-waves" }
+    @{ Path = "src\ok-wuthering-waves"; Branch = "master"; Name = "ok-wuthering-waves" },
+    @{ Path = "src\StarRailAssistant"; Branch = "main"; Name = "StarRailAssistant" }
 )
 
 foreach ($submodule in $Submodules) {
@@ -135,7 +194,12 @@ foreach ($submodule in $Submodules) {
     Invoke-Checked -FilePath "git" -Arguments @("fetch", "origin", $submodule.Branch) -WorkingDirectory $path
     Invoke-Checked -FilePath "git" -Arguments @("checkout", "-f", "-B", $submodule.Branch, "origin/$($submodule.Branch)") -WorkingDirectory $path
     Invoke-Checked -FilePath "git" -Arguments @("reset", "--hard", "origin/$($submodule.Branch)") -WorkingDirectory $path
-    Invoke-Checked -FilePath "git" -Arguments @("-c", "core.longpaths=true", "submodule", "update", "--init", "--recursive") -WorkingDirectory $path
+    Invoke-GitBash -Arguments @("-c", "core.longpaths=true", "submodule", "update", "--init", "--recursive") -WorkingDirectory $path
 }
 
-Write-Host "Root repository and installed submodules are up to date."
+if ($SkipRoot) {
+    Write-Host "Installed submodules are up to date."
+}
+else {
+    Write-Host "Root repository and installed submodules are up to date."
+}

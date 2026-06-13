@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("wuthering", "endfield", "nte")]
+    [ValidateSet("wuthering", "endfield", "nte", "starrail")]
     [string]$AppId,
     [string]$Root = "",
     [string]$ProjectDir = "",
@@ -119,12 +119,14 @@ $projectNames = @{
     wuthering = "ok-wuthering-waves"
     endfield = "ok-end-field"
     nte = "ok-nte"
+    starrail = "StarRailAssistant"
 }
 
 $defaultGameProcessNames = @{
     wuthering = @("Client-Win64-Shipping.exe")
     endfield = @("Endfield.exe")
     nte = @("HTGame.exe")
+    starrail = @("StarRail.exe")
 }
 
 if (-not $Root) {

@@ -52,6 +52,7 @@ BETTERGI_ICON = ICONS_DIR / "bettergi.png"
 WUTHERING_ICON = ICONS_DIR / "ok-wuthering-waves.png"
 ENDFIELD_ICON = ICONS_DIR / "ok-end-field.png"
 NTE_ICON = ICONS_DIR / "ok-nte.png"
+STARRAIL_ICON = ICONS_DIR / "starrail.png"
 LOG_DIR = ROOT / "Logs" / "LocalDailyGui"
 LOG_ARCHIVE_DIR = ROOT / "Logs"
 DEBUG_COMMANDS_PATH = LOG_DIR / "debug_commands.jsonl"
@@ -66,8 +67,9 @@ SCHEDULED_RUN_TIMEOUT_MINUTES = 30
 SCHEDULED_RUN_TIMEOUT = timedelta(minutes=SCHEDULED_RUN_TIMEOUT_MINUTES)
 LOG_FILE_STAMP_FORMAT = "%Y%m%d_%H%M%S"
 LOG_FILE_STAMP_LENGTH = 15
-SETTINGS_VERSION = 6
+SETTINGS_VERSION = 7
 LEGACY_DEFAULT_TIMES: dict[str, list[str]] = {}
+SUBMODULE_UPDATE_LABEL = "子项目更新"
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 TASK_PROCESS_FLAGS = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -264,6 +266,28 @@ APPS: tuple[AppConfig, ...] = (
             ),
         ),
     ),
+    AppConfig(
+        app_id="starrail",
+        name="SRA-崩铁",
+        project_dir=SRC_DIR / "StarRailAssistant",
+        script=SCRIPTS / "Run-StarRailAssistantDaily.ps1",
+        workdir=ROOT,
+        icon=STARRAIL_ICON,
+        default_times=(),
+        requires_game_verification=False,
+        cleanup_commands=(
+            (
+                POWERSHELL,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(SCRIPTS / "Stop-Ok-App.ps1"),
+                "-AppId",
+                "starrail",
+            ),
+        ),
+    ),
 )
 
 INSTALL_DIR_MARKERS = {
@@ -279,6 +303,7 @@ GAME_PROCESS_NAMES = {
     "wuthering": "Client-Win64-Shipping.exe",
     "endfield": "Endfield.exe",
     "nte": "HTGame.exe",
+    "starrail": "StarRail.exe",
 }
 
 
@@ -379,6 +404,13 @@ def default_app_settings(app: AppConfig) -> dict:
         app_settings["mumu_cli"] = ""
         app_settings["mumu_verified"] = False
     return app_settings
+
+
+def default_submodule_update_settings() -> dict:
+    return {
+        "enabled": False,
+        "times": [],
+    }
 
 
 def settings_path_value(value: object) -> Path | None:
@@ -509,6 +541,7 @@ class Settings:
         defaults = {
             "settings_version": SETTINGS_VERSION,
             "apps": {app.app_id: default_app_settings(app) for app in APPS},
+            "submodule_update": default_submodule_update_settings(),
             "last_runs": {},
             "log_archives": {},
         }
@@ -530,6 +563,10 @@ class Settings:
         loaded.setdefault("apps", {})
         if not isinstance(loaded["apps"], dict):
             loaded["apps"] = {}
+        if not isinstance(loaded.get("submodule_update"), dict):
+            loaded["submodule_update"] = {}
+        for key, value in default_submodule_update_settings().items():
+            loaded["submodule_update"].setdefault(key, value)
         for app in APPS:
             if not isinstance(loaded["apps"].get(app.app_id), dict):
                 loaded["apps"][app.app_id] = {}
@@ -644,6 +681,33 @@ class Settings:
         current.update({"enabled": enabled, "times": times})
         self.save()
 
+    def submodule_update_enabled(self) -> bool:
+        return bool(self.data["submodule_update"].get("enabled", False))
+
+    def submodule_update_times(self) -> list[str]:
+        times = self.data["submodule_update"].get("times")
+        if isinstance(times, str):
+            return [times]
+        if not isinstance(times, (list, tuple)):
+            return []
+        return list(times)
+
+    def update_submodule_schedule(self, enabled: bool, times: list[str]) -> None:
+        current = self.data.setdefault("submodule_update", default_submodule_update_settings())
+        current.update({"enabled": enabled, "times": times})
+        self.save()
+
+    def was_submodule_update_run(self, date: str, time_value: str) -> bool:
+        return self._submodule_update_key(date, time_value) in self.data["last_runs"]
+
+    def mark_submodule_update_run(self, date: str, time_value: str, reason: str) -> None:
+        self.data["last_runs"][self._submodule_update_key(date, time_value)] = {
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "reason": reason,
+        }
+        self._prune_runs()
+        self.save()
+
     def game_verified(self, app: AppConfig) -> bool:
         return bool(self.data["apps"][app.app_id].get("game_verified", False))
 
@@ -692,6 +756,9 @@ class Settings:
 
     def _key(self, app: AppConfig, date: str, time_value: str) -> str:
         return f"{app.app_id}|{date}|{time_value}"
+
+    def _submodule_update_key(self, date: str, time_value: str) -> str:
+        return f"submodule-update|{date}|{time_value}"
 
     def _prune_runs(self) -> None:
         keep_after = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
@@ -1017,6 +1084,148 @@ class AppRunner:
                     self.log(line)
 
 
+class SubmoduleUpdateRunner:
+    def __init__(self, log_queue: queue.Queue[tuple[str, str]]):
+        self.log_queue = log_queue
+        self.process: subprocess.Popen[str] | None = None
+        self.started_at: datetime | None = None
+        self.start_reason: str | None = None
+        self.stop_requested = False
+        self.lock = threading.Lock()
+
+    @property
+    def running(self) -> bool:
+        with self.lock:
+            return self.process is not None and self.process.poll() is None
+
+    def start(self, reason: str) -> bool:
+        with self.lock:
+            if self.process is not None and self.process.poll() is None:
+                self.log("更新正在运行，忽略新的更新请求")
+                return False
+
+            self.started_at = datetime.now()
+            self.start_reason = reason
+            self.stop_requested = False
+            command = [
+                POWERSHELL,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(SCRIPTS / "Update-InstalledSubmodules.ps1"),
+                "-Root",
+                str(ROOT),
+                "-SkipRoot",
+            ]
+            self.log(f"启动更新: {' '.join(command)}")
+            self.process = subprocess.Popen(
+                command,
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=TASK_PROCESS_FLAGS,
+            )
+
+        threading.Thread(target=self._read_output, daemon=True).start()
+        return True
+
+    def stop(self, reason: str | None = None) -> None:
+        with self.lock:
+            process = self.process
+            if process is None or process.poll() is not None:
+                return
+            if self.stop_requested:
+                return
+            self.stop_requested = True
+
+        if reason:
+            self.log(reason)
+        assert process is not None
+        self.log(f"强制退出更新进程树 PID={process.pid}")
+        result = subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            creationflags=HIDDEN_PROCESS_FLAGS,
+        )
+        output = result.stdout.strip()
+        if output:
+            for line in output.splitlines():
+                self.log(line)
+
+    def scheduled_timeout_elapsed(self, now: datetime) -> timedelta | None:
+        with self.lock:
+            process = self.process
+            if (
+                process is None
+                or process.poll() is not None
+                or self.start_reason != "scheduled"
+                or self.stop_requested
+                or self.started_at is None
+            ):
+                return None
+            started_at = self.started_at
+
+        elapsed = now - started_at
+        if elapsed < SCHEDULED_RUN_TIMEOUT:
+            return None
+        return elapsed
+
+    def snapshot(self, now: datetime) -> dict:
+        with self.lock:
+            process = self.process
+            running = process is not None and process.poll() is None
+            started_at = self.started_at
+            start_reason = self.start_reason
+            stop_requested = self.stop_requested
+            pid = process.pid if process is not None else None
+
+        elapsed_seconds = None
+        if running and started_at is not None:
+            elapsed_seconds = max(0, int((now - started_at).total_seconds()))
+
+        return {
+            "running": running,
+            "pid": pid,
+            "start_reason": start_reason,
+            "started_at": started_at.isoformat(timespec="seconds") if started_at else None,
+            "elapsed_seconds": elapsed_seconds,
+            "stop_requested": stop_requested,
+        }
+
+    def log(self, message: str) -> None:
+        self.log_queue.put(("update", message))
+
+    def _read_output(self) -> None:
+        process = self.process
+        if process is None:
+            return
+
+        assert process.stdout is not None
+        for line in process.stdout:
+            self.log(line.rstrip())
+
+        exit_code = process.wait()
+        self.log(f"更新结束，退出码: {exit_code}")
+        with self.lock:
+            if self.process is process:
+                self.process = None
+                self.started_at = None
+                self.start_reason = None
+                self.stop_requested = False
+        self.log_queue.put(("update", f"__UPDATE_EXIT__:{exit_code}"))
+
+
 class TaskRow:
     def __init__(
         self,
@@ -1266,6 +1475,66 @@ class ScheduleDialog:
         self.window.destroy()
 
 
+class SubmoduleUpdateDialog:
+    def __init__(self, root: Tk, settings: Settings, on_save, on_run_now):
+        self.settings = settings
+        self.on_save = on_save
+        self.on_run_now = on_run_now
+        self.window = Toplevel(root)
+        self.window.title("子项目更新计划")
+        self.window.resizable(False, False)
+        self.window.transient(root)
+        self.window.grab_set()
+
+        panel = Frame(self.window, padx=18, pady=16, bg="#f7f7f4")
+        panel.pack(fill=BOTH, expand=True)
+
+        self.enabled = BooleanVar(value=settings.submodule_update_enabled())
+        Checkbutton(
+            panel,
+            text="启用定时更新",
+            variable=self.enabled,
+            bg="#f7f7f4",
+            font=("Microsoft YaHei UI", 11),
+        ).pack(anchor="w")
+
+        Label(
+            panel,
+            text="时间，多个用逗号分隔，例如 03:30",
+            bg="#f7f7f4",
+            fg="#555555",
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor="w", pady=(12, 4))
+
+        self.times = StringVar(value=",".join(settings.submodule_update_times()))
+        Entry(panel, textvariable=self.times, width=34, font=("Consolas", 12)).pack(fill=X)
+
+        buttons = Frame(panel, bg="#f7f7f4")
+        buttons.pack(anchor="e", pady=(16, 0))
+        ttk.Button(buttons, text="立即更新", command=self.run_now).pack(side=LEFT, padx=6)
+        ttk.Button(buttons, text="取消", command=self.window.destroy).pack(side=LEFT, padx=6)
+        ttk.Button(buttons, text="保存", command=self.save).pack(side=LEFT)
+
+    def run_now(self) -> None:
+        self.on_run_now()
+        self.window.destroy()
+
+    def save(self) -> None:
+        raw_times = self.times.get()
+        if self.enabled.get() or raw_times.strip():
+            try:
+                times = validate_times(raw_times)
+            except ValueError as exc:
+                messagebox.showerror("更新计划错误", str(exc), parent=self.window)
+                return
+        else:
+            times = []
+
+        self.settings.update_submodule_schedule(self.enabled.get(), times)
+        self.on_save()
+        self.window.destroy()
+
+
 class DailyGui:
     def __init__(self):
         ensure_dirs()
@@ -1274,6 +1543,7 @@ class DailyGui:
         self.log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.installers = {app.app_id: AppInstaller(app, self.log_queue) for app in APPS}
         self.runners = {app.app_id: AppRunner(app, self.log_queue, self.settings) for app in APPS}
+        self.update_runner = SubmoduleUpdateRunner(self.log_queue)
         self.rows: dict[str, TaskRow] = {}
         self.images: list[ImageTk.PhotoImage] = []
         self.window_icon: ImageTk.PhotoImage | None = None
@@ -1401,10 +1671,55 @@ class DailyGui:
             task_menu.add_separator()
         task_menu.add_command(label="强制退出全部", command=self.stop_all)
         menu.add_cascade(label="任务", menu=task_menu)
+        update_menu = Menu(menu, tearoff=False)
+        update_menu.add_command(label="立即更新 src 子项目", command=self.start_submodule_update)
+        update_menu.add_command(label="定时设置", command=self.configure_submodule_update)
+        menu.add_cascade(label="更新", menu=update_menu)
         menu.add_command(label="保存今天日志", command=self.save_today_logs)
         menu.add_command(label="清空日志", command=self.clear_logs)
         menu.add_command(label="退出", command=self.on_close)
         self.root.config(menu=menu)
+
+    def configure_submodule_update(self) -> None:
+        SubmoduleUpdateDialog(
+            self.root,
+            self.settings,
+            self.log_submodule_update_schedule,
+            self.start_submodule_update,
+        )
+
+    def log_submodule_update_schedule(self) -> None:
+        enabled = self.settings.submodule_update_enabled()
+        times = self.settings.submodule_update_times()
+        schedule = "启用" if enabled else "禁用"
+        display_times = ", ".join(times) if times else "未设置"
+        self.log("update", f"定时更新已保存: {schedule} | {display_times}")
+        self.write_debug_status("submodule_update_schedule", force=True)
+
+    def any_app_activity_running(self) -> bool:
+        return any(runner.running for runner in self.runners.values()) or any(
+            installer.running for installer in self.installers.values()
+        )
+
+    def start_submodule_update(self, reason: str = "manual") -> bool:
+        if self.update_runner.running:
+            self.log("update", "更新正在运行")
+            return False
+
+        if self.any_app_activity_running() or self.pending_scheduled:
+            if reason == "scheduled":
+                return False
+            if not messagebox.askyesno(
+                "已有任务运行",
+                "已有任务正在运行或排队。继续更新可能改动正在使用的源码，是否仍要更新？",
+                parent=self.root,
+            ):
+                return False
+
+        started = self.update_runner.start(reason)
+        if started:
+            self.write_debug_status("submodule_update_start", force=True)
+        return started
 
     def run(self) -> None:
         self.root.after(250, self.process_logs)
@@ -1490,6 +1805,9 @@ class DailyGui:
             elif command == "stop_all":
                 for runner in self.runners.values():
                     runner.stop("远程调试命令请求强制退出全部")
+                self.update_runner.stop("远程调试命令请求强制退出全部")
+            elif command == "stop_update":
+                self.update_runner.stop("远程调试命令请求强制退出更新")
             elif command == "start":
                 app = self.debug_command_app(payload)
                 if app is not None:
@@ -1526,6 +1844,22 @@ class DailyGui:
                     schedule = "启用" if enabled else "禁用"
                     display_times = ", ".join(times) if times else "未设置"
                     self.log(app.app_id, f"远程调试已更新定时: {schedule} | {display_times}")
+            elif command == "run_update":
+                self.start_submodule_update(reason="debug")
+            elif command == "set_update_schedule":
+                enabled = debug_bool(
+                    payload.get("enabled"),
+                    default=self.settings.submodule_update_enabled(),
+                )
+                times = (
+                    debug_times(payload.get("times"))
+                    if "times" in payload
+                    else self.settings.submodule_update_times()
+                )
+                self.settings.update_submodule_schedule(enabled, times)
+                schedule = "启用" if enabled else "禁用"
+                display_times = ", ".join(times) if times else "未设置"
+                self.log("update", f"远程调试已更新定时: {schedule} | {display_times}")
             elif command == "reload_settings":
                 self.settings.reload()
                 self.refresh_rows()
@@ -1535,6 +1869,7 @@ class DailyGui:
                 if force:
                     for runner in self.runners.values():
                         runner.stop("远程调试命令请求退出 GUI")
+                    self.update_runner.stop("远程调试命令请求退出 GUI")
                 self.log("system", "远程调试命令请求退出 GUI")
                 self.root.after(1000 if force else 100, self.root.destroy)
             else:
@@ -1592,6 +1927,11 @@ class DailyGui:
             "command_file": str(DEBUG_COMMANDS_PATH),
             "command_file_position": self.debug_command_position,
             "pending_scheduled": [app.app_id for app in self.pending_scheduled],
+            "submodule_update": {
+                "enabled": self.settings.submodule_update_enabled(),
+                "times": self.settings.submodule_update_times(),
+                **self.update_runner.snapshot(now),
+            },
             "apps": {},
         }
 
@@ -1787,6 +2127,11 @@ class DailyGui:
                 self.start_next_scheduled()
                 continue
 
+            if message.startswith("__UPDATE_EXIT__:"):
+                self.write_debug_status("submodule_update_exit", force=True)
+                self.start_next_scheduled()
+                continue
+
             if message.startswith("__INSTALL_EXIT__:"):
                 self.settings.refresh_paths()
                 self.refresh_rows()
@@ -1813,7 +2158,11 @@ class DailyGui:
                 self.start_next_scheduled()
                 continue
 
-            app_name = next((app.name for app in APPS if app.app_id == app_id), app_id)
+            app_name = (
+                SUBMODULE_UPDATE_LABEL
+                if app_id == "update"
+                else next((app.name for app in APPS if app.app_id == app_id), app_id)
+            )
             if message.startswith(("Download progress:", "Download completed:")):
                 row = self.rows.get(app_id)
                 if row is not None:
@@ -1853,7 +2202,25 @@ class DailyGui:
 
         self.refresh_rows()
         self.start_next_scheduled()
+        self.check_submodule_update_schedule(now, today)
         self.root.after(10_000, self.check_schedule)
+
+    def check_submodule_update_schedule(self, now: datetime, today: str) -> None:
+        if not self.settings.submodule_update_enabled():
+            return
+        if self.update_runner.running or self.any_app_activity_running() or self.pending_scheduled:
+            return
+
+        for time_value in self.settings.submodule_update_times():
+            hour, minute = (int(part) for part in time_value.split(":"))
+            scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if now < scheduled or now > scheduled + timedelta(minutes=CATCH_UP_MINUTES):
+                continue
+            if self.settings.was_submodule_update_run(today, time_value):
+                continue
+            if self.start_submodule_update(reason="scheduled"):
+                self.settings.mark_submodule_update_run(today, time_value, "scheduled")
+                break
 
     def check_scheduled_timeouts(self, now: datetime) -> None:
         for runner in self.runners.values():
@@ -1863,6 +2230,12 @@ class DailyGui:
             minutes = int(elapsed.total_seconds() // 60)
             runner.stop(
                 f"定时任务已运行 {minutes} 分钟，超过 {SCHEDULED_RUN_TIMEOUT_MINUTES} 分钟，自动强制退出"
+            )
+        elapsed = self.update_runner.scheduled_timeout_elapsed(now)
+        if elapsed is not None:
+            minutes = int(elapsed.total_seconds() // 60)
+            self.update_runner.stop(
+                f"定时更新已运行 {minutes} 分钟，超过 {SCHEDULED_RUN_TIMEOUT_MINUTES} 分钟，自动强制退出"
             )
 
     def check_log_archive(self, now: datetime) -> None:
@@ -1907,6 +2280,8 @@ class DailyGui:
         self.rows[app.app_id].start(reason="scheduled")
 
     def any_running(self, except_app_id: str | None = None) -> bool:
+        if self.update_runner.running:
+            return True
         for app_id, runner in self.runners.items():
             if except_app_id is not None and app_id == except_app_id:
                 continue
@@ -1921,6 +2296,7 @@ class DailyGui:
     def stop_all(self) -> None:
         for runner in self.runners.values():
             runner.stop()
+        self.update_runner.stop("强制退出全部")
 
     def clear_logs(self) -> None:
         self.log_text.configure(state="normal")
@@ -1932,6 +2308,8 @@ class DailyGui:
 
     def on_close(self) -> None:
         running = [app.name for app in APPS if self.runners[app.app_id].running]
+        if self.update_runner.running:
+            running.append(SUBMODULE_UPDATE_LABEL)
         if running:
             choice = messagebox.askyesnocancel(
                 "仍有任务运行",
@@ -2028,6 +2406,12 @@ def check_config() -> int:
         print(f"Legacy settings source: {LEGACY_SETTINGS_PATH}")
     print(f"Log directory: {LOG_DIR}")
     print(f"Log archive directory: {LOG_ARCHIVE_DIR}")
+    update_times = settings.submodule_update_times()
+    update_display = ",".join(update_times) if update_times else "未设置"
+    print(
+        f"submodule_update: enabled={str(settings.submodule_update_enabled()).lower()} "
+        f"times={update_display}"
+    )
     for app in APPS:
         markers = (
             ";".join(
