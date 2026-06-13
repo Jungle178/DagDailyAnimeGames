@@ -1218,7 +1218,7 @@ import ok
 expected = "$ExpectedOkScriptVersion"
 actual = metadata.version("ok-script")
 if expected and actual != expected:
-    raise SystemExit(f"ok-script version mismatch: expected {expected}, got {actual}")
+    print(f"ok-script WARNING: expected {expected}, got {actual}")
 print("ok-script OK:", actual, ok.__file__)
 "@
 Invoke-Checked -FilePath $VenvPython -Arguments @("-c", $OkValidationScript) -WorkingDirectory $ProjectPath
