@@ -374,9 +374,21 @@ def debug_times(value: object) -> list[str]:
 def app_installed(app: AppConfig) -> bool:
     if app.installed_file_sets:
         return any(all(path.is_file() for path in marker_set) for marker_set in app.installed_file_sets)
-    return (app.project_dir / "requirements.txt").is_file() and (
-        app.project_dir / "main.py"
-    ).is_file()
+
+    requirements_path = app.project_dir / "requirements.txt"
+    main_path = app.project_dir / "main.py"
+    if not requirements_path.is_file() or not main_path.is_file():
+        return False
+
+    venv_name = ".venv-sra" if app.app_id == "starrail" else ".venv"
+    marker_path = ROOT / venv_name / ".dagdaily" / f"{app.app_id}.installed"
+    if not marker_path.is_file():
+        return False
+
+    try:
+        return marker_path.stat().st_mtime >= requirements_path.stat().st_mtime
+    except OSError:
+        return False
 
 
 def app_needs_initialization(app: AppConfig) -> bool:

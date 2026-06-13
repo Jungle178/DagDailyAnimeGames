@@ -109,6 +109,30 @@ function Save-JsonObject {
     )
 }
 
+function Write-AppInstallMarker {
+    param(
+        [string]$Root,
+        [string]$VenvName,
+        [string]$AppId,
+        [string]$RequirementsPath
+    )
+
+    $markerDir = Join-Path (Join-Path $Root $VenvName) ".dagdaily"
+    if (-not (Test-Path -LiteralPath $markerDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $markerDir | Out-Null
+    }
+
+    $resolvedRequirementsPath = $executionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RequirementsPath)
+    $marker = [PSCustomObject]@{
+        app_id = $AppId
+        requirements_path = $resolvedRequirementsPath
+        installed_at = (Get-Date).ToString("o")
+    }
+    $markerPath = Join-Path $markerDir "$AppId.installed"
+    Save-JsonObject -Path $markerPath -Object $marker
+    Write-Host "Updated install marker: $markerPath"
+}
+
 function Get-OrCreateJsonObjectProperty {
     param(
         [object]$Object,
@@ -260,6 +284,16 @@ function Test-GitWorkTree {
 
     & git -C $Path rev-parse --is-inside-work-tree *> $null
     return $LASTEXITCODE -eq 0
+}
+
+function Test-AppSourceReady {
+    param(
+        [string]$RequirementsPath,
+        [string]$MainPath
+    )
+
+    return (Test-Path -LiteralPath $RequirementsPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $MainPath -PathType Leaf)
 }
 
 function Get-GitHubLatestRelease {
@@ -1117,10 +1151,15 @@ Require-File $SetupScript
 
 Write-Host "Installing $($App.Name)..."
 Require-Git
-if (Test-GitWorkTree -Path $ProjectPath) {
+$sourceReady = Test-AppSourceReady -RequirementsPath $RequirementsPath -MainPath $MainPath
+$isExistingWorkTree = Test-GitWorkTree -Path $ProjectPath
+if ($isExistingWorkTree -and $sourceReady) {
     Write-Host "Using existing source checkout: $ProjectPath"
 }
 else {
+    if ($isExistingWorkTree) {
+        Write-Host "Existing source checkout is incomplete; refreshing submodule: $ProjectPath"
+    }
     $submodulePathSpec = $App.Path.Replace("\", "/")
     Invoke-GitBash -Arguments @("-c", "core.longpaths=true", "submodule", "update", "--init", "--recursive", "--", $submodulePathSpec) -WorkingDirectory $Root
 }
@@ -1160,6 +1199,7 @@ if ($Framework -eq "sra") {
     else {
         Write-Host "Validating StarRailAssistant..."
         Invoke-Checked -FilePath $VenvPython -Arguments @($MainPath, "--version", "--no-admin") -WorkingDirectory $ProjectPath
+        Write-AppInstallMarker -Root $Root -VenvName $VenvName -AppId $AppId -RequirementsPath $RequirementsPath
     }
     Write-Host "$($App.Name) is ready."
     exit 0
@@ -1211,6 +1251,10 @@ if ($PresetApps -contains $AppId) {
     Set-JsonProperty $dailyConfig "Exit After Task" $true
     Save-JsonObject $DailyConfigPath $dailyConfig
     Write-Host "  Preset: Exit After Task = true"
+}
+
+if (-not $SkipInstall) {
+    Write-AppInstallMarker -Root $Root -VenvName $VenvName -AppId $AppId -RequirementsPath $RequirementsPath
 }
 
 Write-Host "$($App.Name) is ready."
