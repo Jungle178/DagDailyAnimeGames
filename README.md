@@ -6,7 +6,7 @@
 
 ## 启动
 
-需要 Windows 和 Git；如果没有 Python 3.11-3.13，脚本会自动下载安装官方 Python 3.12。推荐直接运行根目录入口：
+需要 Windows 和 Git；如果没有 Python 3.11-3.13，脚本会自动下载安装官方 Python 3.12。StarRailAssistant GUI 从源码启动，还需要 .NET 10 SDK。推荐直接运行根目录入口：
 
 ```powershell
 .\Run.bat
