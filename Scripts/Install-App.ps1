@@ -1203,7 +1203,7 @@ Invoke-Checked -FilePath "powershell.exe" -Arguments $setupArgs -WorkingDirector
 Require-File $VenvPython
 
 if ($Framework -eq "ok" -and -not $SkipInstall) {
-    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-U", "-r", $RequirementsPath) -WorkingDirectory $Root
+    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-r", $RequirementsPath) -WorkingDirectory $Root
     Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "check") -WorkingDirectory $Root
 }
 else {

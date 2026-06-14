@@ -334,9 +334,8 @@ if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
 Require-File $VenvPython
 
 if (-not $SkipInstall) {
-    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "ensurepip", "--upgrade") -WorkingDirectory $Root
-    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-U", "pip", "setuptools", "wheel") -WorkingDirectory $Root
-    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-U", "-r", $RequirementsPath) -WorkingDirectory $Root
+    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "ensurepip") -WorkingDirectory $Root
+    Invoke-Checked -FilePath $VenvPython -Arguments @("-m", "pip", "install", "-r", $RequirementsPath) -WorkingDirectory $Root
 }
 else {
     Write-Host "Skipping dependency installation."
